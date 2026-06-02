@@ -16,6 +16,13 @@ import {
   VENDOR_PAYMENTS_METADATA_UPDATED,
 } from "./data/marylandVendorPayments";
 import {
+  DEFAULT_GRANTS_LOANS_METADATA,
+  fetchGrantLoanDetail,
+  fetchGrantLoanYears,
+  GRANTS_LOANS_LAST_UPDATED,
+  GRANTS_LOANS_METADATA_UPDATED,
+} from "./data/marylandGrantsLoans";
+import {
   CAPITAL_PROJECTS_LAST_UPDATED,
   CAPITAL_PROJECTS_METADATA_UPDATED,
   DEFAULT_CAPITAL_PROJECT_METADATA,
@@ -65,6 +72,10 @@ const ANALYSIS_MODES = [
     label: "Vendor Payments",
   },
   {
+    value: "grants",
+    label: "Grants & Loans",
+  },
+  {
     value: "capital",
     label: "Capital Projects",
   },
@@ -102,6 +113,12 @@ const QUESTION_OPTIONS = [
     value: "vendor_payments",
     label: "Vendor payments",
     description: "Shows the official vendor-payment source status and exclusions.",
+  },
+  {
+    value: "grants_loans",
+    label: "Grants and loans",
+    description:
+      "Shows official Maryland grant and loan recipient records from the State Aid dataset.",
   },
   {
     value: "capital_projects",
@@ -218,6 +235,7 @@ function getInitialAnalysisMode() {
   const requestedQuestion = getQueryValue("question");
 
   if (requestedQuestion === "vendor_payments") return "payments";
+  if (requestedQuestion === "grants_loans") return "grants";
   if (requestedQuestion === "capital_projects") return "capital";
   if (requestedQuestion === "education_outcomes") return "accountability";
 
@@ -284,6 +302,10 @@ function matchesQuestion(row, questionMode) {
     return false;
   }
 
+  if (questionMode === "grants_loans") {
+    return false;
+  }
+
   if (questionMode === "capital_projects") {
     return false;
   }
@@ -302,6 +324,10 @@ function getQuestionNotice(questionMode, selectedYearLabel) {
 
   if (questionMode === "vendor_payments") {
     return "Vendor payments use the official Maryland payments dataset. These are payment records, not operating-budget allocations, and current-year values may be partial.";
+  }
+
+  if (questionMode === "grants_loans") {
+    return "Grants and loans use the official Maryland State Aid dataset. These are recipient assistance records of $50,000 or more, not operating-budget allocations or vendor-payment transactions.";
   }
 
   if (questionMode === "capital_projects") {
@@ -470,9 +496,12 @@ function getAgencySourceTotals(rows, totalAmount) {
     };
 
     current.dollarAmount += row.dollarAmount;
-    if (!current.sourceNames.includes(row.name)) {
-      current.sourceNames.push(row.name);
-    }
+    const sourceNames = row.sourceNames?.length ? row.sourceNames : [row.name];
+    sourceNames.forEach((sourceName) => {
+      if (!current.sourceNames.includes(sourceName)) {
+        current.sourceNames.push(sourceName);
+      }
+    });
     if (row.dollarAmount > (current.primaryAmount || 0)) {
       current.name = row.name;
       current.primaryAmount = row.dollarAmount;
@@ -487,14 +516,24 @@ function getAgencySourceTotals(rows, totalAmount) {
   }));
 }
 
-function getAgencyMatchSummary({ operating, vendor, capital }) {
-  const sourceCount = [operating, vendor, capital].filter(Boolean).length;
+function getAgencyMatchSummary({ operating, vendor, grants, capital }) {
+  const sourceCount = [operating, vendor, grants, capital].filter(Boolean).length;
 
-  if (sourceCount >= 3) {
+  if (sourceCount >= 4) {
+    return {
+      confidence: "High",
+      status: "Four-source match",
+      reason:
+        "Matched across operating budget, vendor payments, grants and loans, and capital projects.",
+    };
+  }
+
+  if (sourceCount === 3) {
     return {
       confidence: "High",
       status: "Triangulated",
-      reason: "Matched across operating budget, vendor payments, and capital projects.",
+      reason:
+        "Matched across three connected sources; use detailed source tracing to confirm the definition of each amount.",
     };
   }
 
@@ -513,24 +552,34 @@ function getAgencyMatchSummary({ operating, vendor, capital }) {
   };
 }
 
-function getPreferredAgencyName({ operating, vendor, capital }) {
-  return operating?.name || capital?.name || vendor?.name || "Unknown agency";
+function getPreferredAgencyName({ operating, vendor, grants, capital }) {
+  return (
+    operating?.name ||
+    capital?.name ||
+    grants?.name ||
+    vendor?.name ||
+    "Unknown agency"
+  );
 }
 
 function getAgencyReconciliationRows({
-  operatingRows,
-  vendorRows,
-  capitalRows,
-  operatingTotal,
-  vendorTotal,
-  capitalTotal,
+  operatingRows = [],
+  vendorRows = [],
+  grantRows = [],
+  capitalRows = [],
+  operatingTotal = 0,
+  vendorTotal = 0,
+  grantTotal = 0,
+  capitalTotal = 0,
 }) {
   const operatingTotals = getAgencySourceTotals(operatingRows, operatingTotal);
   const vendorTotals = getAgencySourceTotals(vendorRows, vendorTotal);
+  const grantTotals = getAgencySourceTotals(grantRows, grantTotal);
   const capitalTotals = getAgencySourceTotals(capitalRows, capitalTotal);
   const keys = new Set([
     ...operatingTotals.map((row) => row.key),
     ...vendorTotals.map((row) => row.key),
+    ...grantTotals.map((row) => row.key),
     ...capitalTotals.map((row) => row.key),
   ]);
 
@@ -538,28 +587,35 @@ function getAgencyReconciliationRows({
     .map((key) => {
       const operating = operatingTotals.find((row) => row.key === key);
       const vendor = vendorTotals.find((row) => row.key === key);
+      const grants = grantTotals.find((row) => row.key === key);
       const capital = capitalTotals.find((row) => row.key === key);
-      const match = getAgencyMatchSummary({ operating, vendor, capital });
+      const match = getAgencyMatchSummary({ operating, vendor, grants, capital });
       const maxAmount = Math.max(
         operating?.dollarAmount || 0,
         vendor?.dollarAmount || 0,
+        grants?.dollarAmount || 0,
         capital?.dollarAmount || 0
       );
 
       return {
         key,
-        name: getPreferredAgencyName({ operating, vendor, capital }),
+        name: getPreferredAgencyName({ operating, vendor, grants, capital }),
         operating,
         vendor,
+        grants,
         capital,
         matchConfidence: match.confidence,
         matchStatus: match.status,
         matchReason: match.reason,
-        sourceCount: [operating, vendor, capital].filter(Boolean).length,
+        sourceCount: [operating, vendor, grants, capital].filter(Boolean).length,
         maxAmount,
         paymentScale:
           operating?.dollarAmount > 0 && vendor?.dollarAmount
             ? (vendor.dollarAmount / operating.dollarAmount) * 100
+            : null,
+        grantScale:
+          operating?.dollarAmount > 0 && grants?.dollarAmount
+            ? (grants.dollarAmount / operating.dollarAmount) * 100
             : null,
         capitalScale:
           operating?.dollarAmount > 0 && capital?.dollarAmount
@@ -705,7 +761,93 @@ function buildCapitalTraceRow(project, capitalProjectDetail) {
   };
 }
 
+function buildGrantLoanTraceRow(award, grantLoanDetail) {
+  return {
+    fiscalYear: award.fiscalYear,
+    agencyName: award.agencyName,
+    unitName: award.grantor,
+    programName: award.granteeName,
+    subprogramName: award.description,
+    categoryTitle: award.category,
+    fundType: award.recipientZip,
+    budgetStage: "Grant/loan recipient record",
+    sourceLabel: award.sourceLabel,
+    sourceUrl: award.sourceUrl,
+    confidence: award.confidence,
+    notes: award.notes,
+    dollarAmount: award.dollarAmount,
+    percentage: award.percentage,
+    traceType: "Grant/loan award",
+    traceTotalAmount: grantLoanDetail?.totalAmount || 0,
+    traceTotalLabel: `FY ${award.fiscalYear} grants-and-loans total`,
+  };
+}
+
 function getActiveFilterSummary(filters) {
+  if (filters.traceContext === "grants") {
+    return [
+      { label: "Search", value: filters.searchQuery || "None" },
+      {
+        label: "Grantor",
+        value: filters.agencyFilter === "all" ? "All" : filters.agencyFilter,
+      },
+      {
+        label: "Category",
+        value: filters.categoryFilter === "all" ? "All" : filters.categoryFilter,
+      },
+      {
+        label: "Recipient ZIP",
+        value: filters.grantLoanZipFilter === "all" ? "All" : filters.grantLoanZipFilter,
+      },
+    ];
+  }
+
+  if (filters.traceContext === "vendor") {
+    return [
+      { label: "Search", value: filters.searchQuery || "None" },
+      {
+        label: "Payment agency",
+        value: filters.agencyFilter === "all" ? "All" : filters.agencyFilter,
+      },
+      {
+        label: "Category/code",
+        value: filters.categoryFilter === "all" ? "All" : filters.categoryFilter,
+      },
+    ];
+  }
+
+  if (filters.traceContext === "capital") {
+    return [
+      { label: "Search", value: filters.searchQuery || "None" },
+      {
+        label: "Capital agency",
+        value: filters.agencyFilter === "all" ? "All" : filters.agencyFilter,
+      },
+      {
+        label: "Fund type",
+        value: filters.fundFilter === "all" ? "All" : filters.fundFilter,
+      },
+      {
+        label: "Category",
+        value: filters.categoryFilter === "all" ? "All" : filters.categoryFilter,
+      },
+      {
+        label: "Capital county",
+        value:
+          filters.capitalCountyFilter === "all"
+            ? "All"
+            : filters.capitalCountyFilter,
+      },
+      {
+        label: "Capital type",
+        value:
+          filters.capitalProjectTypeFilter === "all"
+            ? "All"
+            : filters.capitalProjectTypeFilter,
+      },
+    ];
+  }
+
   const summary = [
     { label: "Search", value: filters.searchQuery || "None" },
     { label: "Agency", value: filters.agencyFilter === "all" ? "All" : filters.agencyFilter },
@@ -722,25 +864,6 @@ function getActiveFilterSummary(filters) {
       value: filters.categoryFilter === "all" ? "All" : filters.categoryFilter,
     },
   ];
-
-  if (filters.capitalCountyFilter !== undefined) {
-    summary.push(
-      {
-        label: "Capital county",
-        value:
-          filters.capitalCountyFilter === "all"
-            ? "All"
-            : filters.capitalCountyFilter,
-      },
-      {
-        label: "Capital type",
-        value:
-          filters.capitalProjectTypeFilter === "all"
-            ? "All"
-            : filters.capitalProjectTypeFilter,
-      }
-    );
-  }
 
   return summary;
 }
@@ -835,7 +958,7 @@ function DataCoveragePanels({ metadata, budgetStage }) {
 function QuestionNotice({ questionMode, selectedYearLabel, analysisMode }) {
   const notice =
     analysisMode === "compare"
-      ? "Compare Sources keeps operating-budget allocations, vendor payments, and capital authorizations separate so scale checks do not imply a single reconciled total."
+      ? "Compare Sources keeps operating-budget allocations, vendor payments, grants/loans, and capital authorizations separate so scale checks do not imply a single reconciled total."
       : analysisMode === "reconcile"
         ? "Reconcile Agencies matches published agency labels across sources and flags confidence. Treat the results as review guidance, not audited accounting matches."
       : getQuestionNotice(questionMode, selectedYearLabel);
@@ -846,6 +969,7 @@ function QuestionNotice({ questionMode, selectedYearLabel, analysisMode }) {
         analysisMode === "compare" ||
         analysisMode === "reconcile" ||
         questionMode === "vendor_payments" ||
+        questionMode === "grants_loans" ||
         questionMode === "education_outcomes"
           ? "question-notice warning"
           : "question-notice"
@@ -1055,6 +1179,13 @@ function ComparisonPanel({
   loadingVendorYears,
   loadingVendorPayments,
   vendorErrorMessage,
+  grantLoanYears,
+  selectedGrantLoanYear,
+  onSelectedGrantLoanYearChange,
+  grantLoanDetail,
+  loadingGrantLoanYears,
+  loadingGrantLoans,
+  grantLoanErrorMessage,
   capitalProjectYears,
   selectedCapitalYear,
   onSelectedCapitalYearChange,
@@ -1084,13 +1215,20 @@ function ComparisonPanel({
   const coverageScore = getCoverageScoreSummary();
   const vendorMetadata =
     vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA;
+  const grantLoanMetadata =
+    grantLoanDetail?.metadata || DEFAULT_GRANTS_LOANS_METADATA;
   const capitalMetadata =
     capitalProjectDetail?.metadata || DEFAULT_CAPITAL_PROJECT_METADATA;
   const loadingVendorComparison = loadingVendorYears || loadingVendorPayments;
+  const loadingGrantLoanComparison = loadingGrantLoanYears || loadingGrantLoans;
   const loadingCapitalComparison = loadingCapitalYears || loadingCapitalProjects;
   const vendorScale =
     budgetDetail.totalAmount > 0 && vendorPaymentDetail?.totalAmount
       ? (vendorPaymentDetail.totalAmount / budgetDetail.totalAmount) * 100
+      : 0;
+  const grantLoanScale =
+    budgetDetail.totalAmount > 0 && grantLoanDetail?.totalAmount
+      ? (grantLoanDetail.totalAmount / budgetDetail.totalAmount) * 100
       : 0;
   const capitalScale =
     budgetDetail.totalAmount > 0 && capitalProjectDetail?.totalAmount
@@ -1103,19 +1241,23 @@ function ComparisonPanel({
     100
   );
   const vendorAgencyRows = vendorPaymentDetail?.topAgencies || [];
+  const grantAgencyRows = grantLoanDetail?.topAgencies || [];
   const capitalAgencyRows = capitalProjectDetail?.topAgencies || [];
   const agencyComparisonRows = getAgencyReconciliationRows({
     operatingRows: operatingAgencyRows.slice(0, 8),
     vendorRows: vendorAgencyRows.slice(0, 8),
+    grantRows: grantAgencyRows.slice(0, 8),
     capitalRows: capitalAgencyRows.slice(0, 8),
     operatingTotal: filteredTotal || budgetDetail.totalAmount,
     vendorTotal: vendorPaymentDetail?.totalAmount || 0,
+    grantTotal: grantLoanDetail?.totalAmount || 0,
     capitalTotal: capitalProjectDetail?.totalAmount || 0,
   }).slice(0, 10);
   const topOperatingRow = [...filteredRows].sort(
     (a, b) => b.dollarAmount - a.dollarAmount
   )[0];
   const topVendor = vendorPaymentDetail?.topVendors?.[0];
+  const topGrantRecipient = grantLoanDetail?.topRecipients?.[0];
   const topCapitalProject = capitalProjectDetail?.projects?.[0];
   const sourceCards = [
     {
@@ -1165,6 +1307,35 @@ function ComparisonPanel({
       loading: loadingVendorComparison,
     },
     {
+      id: "grants",
+      label: "Grants and loans",
+      yearLabel: selectedGrantLoanYear ? `FY ${selectedGrantLoanYear}` : "Loading",
+      amount: grantLoanDetail?.totalAmount || 0,
+      status: grantLoanErrorMessage
+        ? "Error"
+        : loadingGrantLoanComparison
+          ? "Loading"
+          : grantLoanDetail
+            ? "Live"
+            : "Waiting",
+      sourceLabel: grantLoanMetadata.sourceLabel,
+      sourceUrl: grantLoanMetadata.sourceUrl,
+      rowDetail: grantLoanDetail
+        ? `${formatNumber(grantLoanDetail.rowCount)} award rows`
+        : "Separate official State Aid source",
+      primarySignal: topGrantRecipient
+        ? `${topGrantRecipient.name}: ${formatMoney(
+            topGrantRecipient.dollarAmount
+          )}`
+        : "Top recipient loads with the grants-and-loans source",
+      explains:
+        "Recipient-level State Aid grants and loans by grantor, recipient, category, ZIP, date, and amount.",
+      guardrail:
+        "It includes awards of $50,000 or more to profit and nonprofit entities, not all aid, local-government payments, or operating-budget intent.",
+      errorMessage: grantLoanErrorMessage,
+      loading: loadingGrantLoanComparison,
+    },
+    {
       id: "capital",
       label: "Capital projects",
       yearLabel: selectedCapitalYear ? `FY ${selectedCapitalYear}` : "Loading",
@@ -1199,12 +1370,12 @@ function ComparisonPanel({
     <section className="panel comparison-panel">
       <div className="panel-heading">
         <div>
-          <h2>Budget vs Payments vs Capital</h2>
+          <h2>Budget vs Payments vs Grants vs Capital</h2>
           <p>
             Compare the main public spending sources without merging unlike
             numbers into one total. The operating budget is the plan, vendor
-            payments show payment activity, and capital projects show long-term
-            authorizations.
+            payments show payment activity, grants and loans show State Aid
+            assistance, and capital projects show long-term authorizations.
           </p>
         </div>
         <StageBadge stage={selectedYearSummary?.budgetStage || budgetDetail.budgetStage} />
@@ -1220,6 +1391,22 @@ function ComparisonPanel({
             disabled={loadingVendorYears || !vendorPaymentYears.length}
           >
             {vendorPaymentYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="compare-grant-year">Grant/loan fiscal year</label>
+          <select
+            id="compare-grant-year"
+            value={selectedGrantLoanYear}
+            onChange={(event) => onSelectedGrantLoanYearChange(event.target.value)}
+            disabled={loadingGrantLoanYears || !grantLoanYears.length}
+          >
+            {grantLoanYears.map((year) => (
               <option key={year.fiscalYear} value={year.fiscalYear}>
                 FY {year.fiscalYear}
               </option>
@@ -1302,6 +1489,11 @@ function ComparisonPanel({
           detail={`Compared with FY ${budgetDetail.fiscalYear} operating total only`}
         />
         <MetricCard
+          label="Grant/loan scale check"
+          value={grantLoanDetail ? formatPercent(grantLoanScale) : "Loading"}
+          detail={`Compared with FY ${budgetDetail.fiscalYear} operating total only`}
+        />
+        <MetricCard
           label="Capital authorization scale check"
           value={capitalProjectDetail ? formatPercent(capitalScale) : "Loading"}
           detail={`Compared with FY ${budgetDetail.fiscalYear} operating total only`}
@@ -1322,9 +1514,9 @@ function ComparisonPanel({
         <article>
           <h3>Same dollars?</h3>
           <p>
-            No. Operating budgets, vendor payments, and capital authorizations
-            answer different questions. The scale checks are orientation, not
-            audited reconciliations.
+            No. Operating budgets, vendor payments, grants/loans, and capital
+            authorizations answer different questions. The scale checks are
+            orientation, not audited reconciliations.
           </p>
         </article>
         <article>
@@ -1332,6 +1524,8 @@ function ComparisonPanel({
           <p>
             Operating FY {budgetDetail.fiscalYear}, payment{" "}
             {selectedVendorYear ? `FY ${selectedVendorYear}` : "year loading"},
+            grant/loan{" "}
+            {selectedGrantLoanYear ? `FY ${selectedGrantLoanYear}` : "year loading"},
             and capital{" "}
             {selectedCapitalYear ? `FY ${selectedCapitalYear}` : "year loading"}{" "}
             are kept visible because fiscal years do not always cover the same
@@ -1367,6 +1561,7 @@ function ComparisonPanel({
                   <th>Agency label</th>
                   <th>Operating allocations</th>
                   <th>Vendor payments</th>
+                  <th>Grants/loans</th>
                   <th>Capital authorizations</th>
                 </tr>
               </thead>
@@ -1383,6 +1578,13 @@ function ComparisonPanel({
                       {row.vendor
                         ? formatMoney(row.vendor.dollarAmount)
                         : vendorPaymentDetail
+                          ? "Not in top source rows"
+                          : "Loading"}
+                    </td>
+                    <td>
+                      {row.grants
+                        ? formatMoney(row.grants.dollarAmount)
+                        : grantLoanDetail
                           ? "Not in top source rows"
                           : "Loading"}
                     </td>
@@ -1415,9 +1617,9 @@ function ComparisonPanel({
       </div>
 
       <footer className="panel-footnote">
-        This comparison intentionally keeps source definitions separate. A future
-        reconciliation view can match agency, program, procurement, and project
-        identifiers where official records expose enough shared keys.
+        This comparison intentionally keeps source definitions separate.
+        Reconciliation can match agency labels where official records expose
+        enough shared context, but it should not merge unlike totals.
       </footer>
     </section>
   );
@@ -1433,6 +1635,13 @@ function ReconciliationPanel({
   loadingVendorYears,
   loadingVendorPayments,
   vendorErrorMessage,
+  grantLoanYears,
+  selectedGrantLoanYear,
+  onSelectedGrantLoanYearChange,
+  grantLoanDetail,
+  loadingGrantLoanYears,
+  loadingGrantLoans,
+  grantLoanErrorMessage,
   capitalProjectYears,
   selectedCapitalYear,
   onSelectedCapitalYearChange,
@@ -1442,6 +1651,7 @@ function ReconciliationPanel({
   capitalErrorMessage,
   onOpenOperatingAgency,
   onOpenVendorAgency,
+  onOpenGrantLoanAgency,
   onOpenCapitalAgency,
 }) {
   const [searchQuery, setSearchQuery] = useState("");
@@ -1468,9 +1678,11 @@ function ReconciliationPanel({
       getAgencyReconciliationRows({
         operatingRows: operatingAgencyRows,
         vendorRows: vendorPaymentDetail?.topAgencies || [],
+        grantRows: grantLoanDetail?.topAgencies || [],
         capitalRows: capitalAgencyRows,
         operatingTotal: filteredTotal || budgetDetail.totalAmount,
         vendorTotal: vendorPaymentDetail?.totalAmount || 0,
+        grantTotal: grantLoanDetail?.totalAmount || 0,
         capitalTotal: capitalProjectDetail?.totalAmount || 0,
       }),
     [
@@ -1478,6 +1690,8 @@ function ReconciliationPanel({
       capitalAgencyRows,
       capitalProjectDetail?.totalAmount,
       filteredTotal,
+      grantLoanDetail?.topAgencies,
+      grantLoanDetail?.totalAmount,
       operatingAgencyRows,
       vendorPaymentDetail?.topAgencies,
       vendorPaymentDetail?.totalAmount,
@@ -1490,6 +1704,7 @@ function ReconciliationPanel({
       const sourceNames = [
         ...(row.operating?.sourceNames || []),
         ...(row.vendor?.sourceNames || []),
+        ...(row.grants?.sourceNames || []),
         ...(row.capital?.sourceNames || []),
       ];
       const matchesSearch =
@@ -1498,7 +1713,7 @@ function ReconciliationPanel({
         sourceNames.some((name) => normalizeAgencyName(name).includes(query));
       const matchesFilter =
         matchFilter === "all" ||
-        (matchFilter === "triangulated" && row.sourceCount === 3) ||
+        (matchFilter === "triangulated" && row.sourceCount >= 3) ||
         (matchFilter === "partial" && row.sourceCount === 2) ||
         (matchFilter === "review" && row.sourceCount === 1);
 
@@ -1508,8 +1723,11 @@ function ReconciliationPanel({
 
   const selectedAgency =
     visibleRows.find((row) => row.key === selectedAgencyKey) || visibleRows[0];
+  const fourSourceCount = reconciliationRows.filter(
+    (row) => row.sourceCount === 4
+  ).length;
   const triangulatedCount = reconciliationRows.filter(
-    (row) => row.sourceCount === 3
+    (row) => row.sourceCount >= 3
   ).length;
   const partialCount = reconciliationRows.filter(
     (row) => row.sourceCount === 2
@@ -1520,6 +1738,8 @@ function ReconciliationPanel({
   const loadingSourceData =
     loadingVendorYears ||
     loadingVendorPayments ||
+    loadingGrantLoanYears ||
+    loadingGrantLoans ||
     loadingCapitalYears ||
     loadingCapitalProjects;
 
@@ -1527,6 +1747,7 @@ function ReconciliationPanel({
     return [
       ...(row?.operating?.sourceNames || []),
       ...(row?.vendor?.sourceNames || []),
+      ...(row?.grants?.sourceNames || []),
       ...(row?.capital?.sourceNames || []),
     ];
   }
@@ -1541,10 +1762,13 @@ function ReconciliationPanel({
       !row.vendor
         ? "No vendor-payment agency match appears in the loaded top-agency payment summary."
         : "",
+      !row.grants
+        ? "No grant/loan agency match appears in the loaded top-agency assistance summary."
+        : "",
       !row.capital
         ? "No capital-project agency match appears in the normalized capital-project rows."
         : "",
-      "Payment totals and capital authorizations are scale signals, not amounts subtracted from operating allocations.",
+      "Payment totals, grants/loans, and capital authorizations are scale signals, not amounts subtracted from operating allocations.",
       row.matchReason,
     ].filter(Boolean);
   }
@@ -1556,8 +1780,8 @@ function ReconciliationPanel({
           <h2>Agency Reconciliation</h2>
           <p>
             Match agency labels across the operating budget, vendor payments,
-            and capital projects. Confidence describes source alignment, not an
-            audited accounting reconciliation.
+            grants/loans, and capital projects. Confidence describes source
+            alignment, not an audited accounting reconciliation.
           </p>
         </div>
         <CoverageStatusBadge status="Live" />
@@ -1573,6 +1797,22 @@ function ReconciliationPanel({
             disabled={loadingVendorYears || !vendorPaymentYears.length}
           >
             {vendorPaymentYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="reconcile-grant-year">Grant/loan fiscal year</label>
+          <select
+            id="reconcile-grant-year"
+            value={selectedGrantLoanYear}
+            onChange={(event) => onSelectedGrantLoanYearChange(event.target.value)}
+            disabled={loadingGrantLoanYears || !grantLoanYears.length}
+          >
+            {grantLoanYears.map((year) => (
               <option key={year.fiscalYear} value={year.fiscalYear}>
                 FY {year.fiscalYear}
               </option>
@@ -1622,9 +1862,9 @@ function ReconciliationPanel({
         </div>
       </div>
 
-      {(vendorErrorMessage || capitalErrorMessage) && (
+      {(vendorErrorMessage || grantLoanErrorMessage || capitalErrorMessage) && (
         <p className="error-message">
-          {vendorErrorMessage || capitalErrorMessage}
+          {vendorErrorMessage || grantLoanErrorMessage || capitalErrorMessage}
         </p>
       )}
 
@@ -1635,9 +1875,9 @@ function ReconciliationPanel({
           detail={`${formatNumber(visibleRows.length)} visible after filters`}
         />
         <MetricCard
-          label="Triangulated matches"
+          label="Three-plus source matches"
           value={formatNumber(triangulatedCount)}
-          detail="Visible across all three connected sources"
+          detail={`${formatNumber(fourSourceCount)} visible across all four connected sources`}
         />
         <MetricCard
           label="Partial matches"
@@ -1679,8 +1919,10 @@ function ReconciliationPanel({
                     <th>Confidence</th>
                     <th>Operating</th>
                     <th>Payments</th>
+                    <th>Grants/Loans</th>
                     <th>Capital</th>
                     <th>Payment scale</th>
+                    <th>Grant/loan scale</th>
                     <th>Capital scale</th>
                   </tr>
                 </thead>
@@ -1715,6 +1957,11 @@ function ReconciliationPanel({
                           : "No match"}
                       </td>
                       <td>
+                        {row.grants
+                          ? formatMoney(row.grants.dollarAmount)
+                          : "No match"}
+                      </td>
+                      <td>
                         {row.capital
                           ? formatMoney(row.capital.dollarAmount)
                           : "No match"}
@@ -1723,6 +1970,11 @@ function ReconciliationPanel({
                         {row.paymentScale === null
                           ? "Not comparable"
                           : formatPercent(row.paymentScale)}
+                      </td>
+                      <td>
+                        {row.grantScale === null
+                          ? "Not comparable"
+                          : formatPercent(row.grantScale)}
                       </td>
                       <td>
                         {row.capitalScale === null
@@ -1782,6 +2034,21 @@ function ReconciliationPanel({
                   </small>
                 </article>
                 <article>
+                  <span>Grants and loans</span>
+                  <strong>
+                    {selectedAgency.grants
+                      ? formatFullMoney(selectedAgency.grants.dollarAmount)
+                      : "No match"}
+                  </strong>
+                  <small>
+                    {selectedAgency.grants
+                      ? `${formatPercent(
+                          selectedAgency.grants.percentage
+                        )} of grants/loans total`
+                      : "Not visible in grant/loan top-agency rows"}
+                  </small>
+                </article>
+                <article>
                   <span>Capital authorizations</span>
                   <strong>
                     {selectedAgency.capital
@@ -1836,6 +2103,19 @@ function ReconciliationPanel({
                 <button
                   type="button"
                   className="secondary-button"
+                  disabled={!selectedAgency.grants}
+                  onClick={() =>
+                    onOpenGrantLoanAgency(
+                      selectedAgency.grants?.sourceNames?.[0] ||
+                        selectedAgency.grants?.name
+                    )
+                  }
+                >
+                  Open grant/loan rows
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
                   disabled={!selectedAgency.capital}
                   onClick={() => onOpenCapitalAgency(selectedAgency.capital?.name)}
                 >
@@ -1852,8 +2132,8 @@ function ReconciliationPanel({
       <footer className="panel-footnote">
         Agency reconciliation uses normalized published labels and a small set of
         Maryland-specific aliases. It is designed to guide review and trace
-        work, not to certify audited matches across budget, payment, and capital
-        systems.
+        work, not to certify audited matches across budget, payment, grant/loan,
+        and capital systems.
       </footer>
     </section>
   );
@@ -2538,6 +2818,377 @@ function VendorPaymentsPanel({
   );
 }
 
+function GrantLoanBars({ rows }) {
+  const maxAmount = rows[0]?.dollarAmount || 0;
+
+  if (!rows.length) {
+    return <p className="empty-state">No grants or loans match the current filters.</p>;
+  }
+
+  return (
+    <div className="bar-list">
+      {rows.map((row, index) => {
+        const width = maxAmount > 0 ? (row.dollarAmount / maxAmount) * 100 : 0;
+
+        return (
+          <div
+            className="bar-row"
+            key={`${row.fiscalYear}-${row.grantor}-${row.granteeName}-${row.category}-${index}`}
+          >
+            <div className="bar-row-top">
+              <span>{row.granteeName}</span>
+              <strong>{formatMoney(row.dollarAmount)}</strong>
+            </div>
+            <div className="bar-track" aria-hidden="true">
+              <div
+                className="bar-fill"
+                style={{
+                  "--bar-width": `${width}%`,
+                  "--bar-color": BAR_COLORS[index % BAR_COLORS.length],
+                }}
+              />
+            </div>
+            <div className="bar-row-meta">
+              <span>{row.agencyName}</span>
+              <span>
+                {row.category} / {row.recipientZip} /{" "}
+                {formatNumber(row.awardCount)} rows /{" "}
+                {formatPercent(row.percentage)}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function GrantsLoansPanel({
+  grantLoanYears,
+  selectedGrantLoanYear,
+  onSelectedGrantLoanYearChange,
+  grantLoanSearchQuery,
+  onGrantLoanSearchQueryChange,
+  grantorFilter,
+  onGrantorFilterChange,
+  grantLoanCategoryFilter,
+  onGrantLoanCategoryFilterChange,
+  grantLoanZipFilter,
+  onGrantLoanZipFilterChange,
+  grantLoanDetail,
+  loading,
+  errorMessage,
+  onTraceAward,
+  onExportAwards,
+  onCopyCitation,
+  onCopyViewLink,
+}) {
+  const metadata = grantLoanDetail?.metadata || DEFAULT_GRANTS_LOANS_METADATA;
+  const awards = grantLoanDetail?.awards || [];
+  const topAwardRows = awards.slice(0, 10);
+  const topRecipient = grantLoanDetail?.topRecipients?.[0];
+  const grantorOptions = grantLoanDetail?.topGrantors || [];
+  const categoryOptions = grantLoanDetail?.categories || [];
+  const zipOptions = grantLoanDetail?.zipCodes || [];
+
+  return (
+    <section className="grant-loan-section">
+      <section className="panel vendor-overview-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Grants & Loans Explorer</h2>
+            <p>
+              Search official Maryland State Aid grant and loan records by
+              recipient, grantor, category, ZIP code, description, and fiscal
+              year. These are assistance records, not operating allocations.
+            </p>
+          </div>
+          <CoverageStatusBadge status="Live" />
+        </div>
+
+        <div className="vendor-source-strip">
+          <div>
+            <span>Official source</span>
+            <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">
+              {metadata.sourceLabel}
+            </a>
+          </div>
+          <div>
+            <span>Updated</span>
+            <strong>{metadata.dataLastUpdated}</strong>
+          </div>
+          <div>
+            <span>Threshold</span>
+            <strong>$50,000+</strong>
+          </div>
+          <div>
+            <span>Portal</span>
+            <a href={metadata.portalUrl} target="_blank" rel="noreferrer">
+              Grants and loans
+            </a>
+          </div>
+        </div>
+
+        <div className="grant-controls" aria-label="Grant and loan controls">
+          <div className="control-field">
+            <label htmlFor="grant-loan-year-select">Grant/loan fiscal year</label>
+            <select
+              id="grant-loan-year-select"
+              value={selectedGrantLoanYear}
+              onChange={(event) => onSelectedGrantLoanYearChange(event.target.value)}
+              disabled={loading || !grantLoanYears.length}
+            >
+              {grantLoanYears.map((year) => (
+                <option key={year.fiscalYear} value={year.fiscalYear}>
+                  FY {year.fiscalYear}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field control-field-wide">
+            <label htmlFor="grant-loan-search-input">Recipient search</label>
+            <input
+              id="grant-loan-search-input"
+              type="search"
+              placeholder="Recipient, grantor, description, category, or ZIP"
+              value={grantLoanSearchQuery}
+              onChange={(event) => onGrantLoanSearchQueryChange(event.target.value)}
+              disabled={loading || !selectedGrantLoanYear}
+            />
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="grantor-filter">Grantor</label>
+            <select
+              id="grantor-filter"
+              value={grantorFilter}
+              onChange={(event) => onGrantorFilterChange(event.target.value)}
+              disabled={loading || !grantLoanDetail}
+            >
+              <option value="all">All grantors</option>
+              {grantorOptions.map((grantor) => (
+                <option key={grantor.name} value={grantor.name}>
+                  {grantor.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="grant-loan-category-filter">Category</label>
+            <select
+              id="grant-loan-category-filter"
+              value={grantLoanCategoryFilter}
+              onChange={(event) =>
+                onGrantLoanCategoryFilterChange(event.target.value)
+              }
+              disabled={loading || !grantLoanDetail}
+            >
+              <option value="all">All categories</option>
+              {categoryOptions.map((category) => (
+                <option key={category.name} value={category.name}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="grant-loan-zip-filter">Recipient ZIP</label>
+            <select
+              id="grant-loan-zip-filter"
+              value={grantLoanZipFilter}
+              onChange={(event) => onGrantLoanZipFilterChange(event.target.value)}
+              disabled={loading || !grantLoanDetail}
+            >
+              <option value="all">All ZIP codes</option>
+              {zipOptions.map((zipCode) => (
+                <option key={zipCode.name} value={zipCode.name}>
+                  {zipCode.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {loading && (
+          <section className="loading-panel vendor-loading-panel" aria-live="polite">
+            <div className="spinner" />
+            <p>Loading FY {selectedGrantLoanYear || ""} grants and loans...</p>
+          </section>
+        )}
+
+        {errorMessage && <p className="error-message">{errorMessage}</p>}
+      </section>
+
+      {grantLoanDetail && !loading && (
+        <>
+          <div className="comparison-grid">
+            <MetricCard
+              label={`FY ${grantLoanDetail.fiscalYear} grant/loan total`}
+              value={formatMoney(grantLoanDetail.totalAmount)}
+              detail={formatFullMoney(grantLoanDetail.totalAmount)}
+            />
+            <MetricCard
+              label="Award rows in source"
+              value={formatNumber(grantLoanDetail.rowCount)}
+              detail="Rows after active grant/loan filters"
+            />
+            <MetricCard
+              label="Grouped awards returned"
+              value={formatNumber(awards.length)}
+              detail={`Top grouped recipient rows, capped at ${formatNumber(
+                grantLoanDetail.awardLimit
+              )}`}
+            />
+            <MetricCard
+              label="Top recipient in view"
+              value={topRecipient ? formatMoney(topRecipient.dollarAmount) : "$0"}
+              detail={topRecipient?.name || "No recipient rows returned"}
+            />
+          </div>
+
+          <section className="dashboard-grid vendor-dashboard-grid">
+            <section className="panel panel-large vendor-nested-panel">
+              <div className="panel-heading">
+                <div>
+                  <h3>Largest Grants And Loans</h3>
+                  <p>
+                    Grouped by grantor, recipient, category, description, fiscal
+                    period, date, and ZIP code after active filters.
+                  </p>
+                </div>
+                <span>{formatNumber(awards.length)} rows</span>
+              </div>
+
+              <GrantLoanBars rows={topAwardRows} />
+            </section>
+
+            <div className="side-stack">
+              <MiniBreakdown
+                title="Top Recipients In View"
+                rows={grantLoanDetail.topRecipients}
+              />
+              <MiniBreakdown
+                title="Grant/Loan Categories"
+                rows={grantLoanDetail.categories.slice(0, 12)}
+              />
+              <MiniBreakdown
+                title="Recipient ZIP Codes"
+                rows={grantLoanDetail.zipCodes.slice(0, 12)}
+              />
+            </div>
+          </section>
+
+          <section className="table-panel vendor-table-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>Grant And Loan Detail</h3>
+                <p>
+                  Showing {formatNumber(awards.length)} grouped rows from FY{" "}
+                  {grantLoanDetail.fiscalYear}.
+                  {grantLoanDetail.isAwardCapped
+                    ? ` The table returns the top ${formatNumber(
+                        grantLoanDetail.awardLimit
+                      )} grouped award rows.`
+                    : ""}
+                </p>
+              </div>
+              <span>{formatMoney(grantLoanDetail.totalAmount)}</span>
+            </div>
+
+            <div className="table-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onExportAwards}
+                disabled={!awards.length}
+              >
+                Export grant/loan CSV
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyCitation}
+              >
+                Copy grant/loan source
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyViewLink}
+              >
+                Copy view link
+              </button>
+            </div>
+
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fiscal Year</th>
+                    <th>Grantor</th>
+                    <th>Recipient</th>
+                    <th>Category</th>
+                    <th>ZIP</th>
+                    <th>Description</th>
+                    <th>Amount</th>
+                    <th>Share</th>
+                    <th>Rows</th>
+                    <th>Confidence</th>
+                    <th>Trace</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {awards.map((award, index) => (
+                    <tr
+                      key={`${award.fiscalYear}-${award.grantor}-${award.granteeName}-${award.recipientZip}-${award.category}-${index}`}
+                    >
+                      <td>FY {award.fiscalYear}</td>
+                      <td>{award.grantor}</td>
+                      <td>{award.granteeName}</td>
+                      <td>{award.category}</td>
+                      <td>{award.recipientZip}</td>
+                      <td>{award.description}</td>
+                      <td>{formatFullMoney(award.dollarAmount)}</td>
+                      <td>{formatPercent(award.percentage)}</td>
+                      <td>{formatNumber(award.awardCount)}</td>
+                      <td>
+                        <ConfidenceBadge confidence={award.confidence} />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="trace-button"
+                          onClick={() => onTraceAward(award)}
+                        >
+                          Trace
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <footer className="panel-footnote">
+            {metadata.limitations.join(" ")}
+            {grantLoanDetail.isAwardCapped
+              ? ` The grouped award table is capped at ${formatNumber(
+                  grantLoanDetail.awardLimit
+                )} rows; the all-row grant/loan total exceeds returned grouped rows by ${formatFullMoney(
+                  grantLoanDetail.awardDifference
+                )}.`
+              : ""}
+          </footer>
+        </>
+      )}
+    </section>
+  );
+}
+
 function CapitalProjectBars({ rows }) {
   const maxAmount = rows[0]?.dollarAmount || 0;
 
@@ -2938,12 +3589,15 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
   const activeFilters = getActiveFilterSummary(filters);
   const isVendorTrace = row.traceType === "Vendor payment";
   const isCapitalTrace = row.traceType === "Capital project";
+  const isGrantTrace = row.traceType === "Grant/loan award";
   const totalLabel = row.traceTotalLabel || "selected-year operating budget total";
   const traceLabel = isVendorTrace
     ? "Vendor payment trace"
     : isCapitalTrace
       ? "Capital project trace"
-      : "Allocation trace";
+      : isGrantTrace
+        ? "Grant/loan trace"
+        : "Allocation trace";
 
   return (
     <div className="trace-drawer-backdrop" role="presentation">
@@ -2991,7 +3645,9 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
                 ? "Payment category/code"
                 : isCapitalTrace
                   ? "County"
-                  : "Department"}
+                  : isGrantTrace
+                    ? "Grantor"
+                    : "Department"}
             </span>
             <strong>{row.unitName}</strong>
           </div>
@@ -3001,12 +3657,20 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
                 ? "Category/code"
                 : isCapitalTrace
                   ? "Capital category"
-                  : "Category"}
+                  : isGrantTrace
+                    ? "Assistance category"
+                    : "Category"}
             </span>
             <strong>{row.categoryTitle}</strong>
           </div>
           <div>
-            <span>{isVendorTrace ? "Vendor ZIP" : "Fund type"}</span>
+            <span>
+              {isVendorTrace
+                ? "Vendor ZIP"
+                : isGrantTrace
+                  ? "Recipient ZIP"
+                  : "Fund type"}
+            </span>
             <strong>{row.fundType}</strong>
           </div>
         </div>
@@ -3044,6 +3708,7 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
 export default function App() {
   const [initialYearRequest] = useState(() => getQueryValue("year"));
   const [initialVendorYearRequest] = useState(() => getQueryValue("paymentYear"));
+  const [initialGrantLoanYearRequest] = useState(() => getQueryValue("grantLoanYear"));
   const [initialCapitalYearRequest] = useState(() => getQueryValue("capitalYear"));
   const [hasInitialFilterParams] = useState(
     () =>
@@ -3067,6 +3732,9 @@ export default function App() {
   const [vendorPaymentYears, setVendorPaymentYears] = useState([]);
   const [selectedVendorYear, setSelectedVendorYear] = useState("");
   const [vendorPaymentDetail, setVendorPaymentDetail] = useState(null);
+  const [grantLoanYears, setGrantLoanYears] = useState([]);
+  const [selectedGrantLoanYear, setSelectedGrantLoanYear] = useState("");
+  const [grantLoanDetail, setGrantLoanDetail] = useState(null);
   const [capitalProjectYears, setCapitalProjectYears] = useState([]);
   const [selectedCapitalYear, setSelectedCapitalYear] = useState("");
   const [capitalProjectDetail, setCapitalProjectDetail] = useState(null);
@@ -3079,7 +3747,12 @@ export default function App() {
     );
 
     return ["compare", "reconcile"].includes(analysisMode) &&
-      ["vendor_payments", "capital_projects", "education_outcomes"].includes(
+      [
+        "vendor_payments",
+        "grants_loans",
+        "capital_projects",
+        "education_outcomes",
+      ].includes(
         initialQuestion
       )
       ? "latest"
@@ -3092,10 +3765,13 @@ export default function App() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [loadingVendorYears, setLoadingVendorYears] = useState(false);
   const [loadingVendorPayments, setLoadingVendorPayments] = useState(false);
+  const [loadingGrantLoanYears, setLoadingGrantLoanYears] = useState(false);
+  const [loadingGrantLoans, setLoadingGrantLoans] = useState(false);
   const [loadingCapitalYears, setLoadingCapitalYears] = useState(false);
   const [loadingCapitalProjects, setLoadingCapitalProjects] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [vendorErrorMessage, setVendorErrorMessage] = useState("");
+  const [grantLoanErrorMessage, setGrantLoanErrorMessage] = useState("");
   const [capitalErrorMessage, setCapitalErrorMessage] = useState("");
   const [traceMessage, setTraceMessage] = useState("");
   const [traceRow, setTraceRow] = useState(null);
@@ -3126,6 +3802,18 @@ export default function App() {
   );
   const [vendorCategoryFilter, setVendorCategoryFilter] = useState(
     () => getQueryValue("vendorCategory") || "all"
+  );
+  const [grantLoanSearchQuery, setGrantLoanSearchQuery] = useState(() =>
+    getQueryValue("grantSearch")
+  );
+  const [grantorFilter, setGrantorFilter] = useState(
+    () => getQueryValue("grantor") || "all"
+  );
+  const [grantLoanCategoryFilter, setGrantLoanCategoryFilter] = useState(
+    () => getQueryValue("grantCategory") || "all"
+  );
+  const [grantLoanZipFilter, setGrantLoanZipFilter] = useState(
+    () => getQueryValue("grantZip") || "all"
   );
   const [capitalSearchQuery, setCapitalSearchQuery] = useState(() =>
     getQueryValue("capitalSearch")
@@ -3163,6 +3851,10 @@ export default function App() {
     setVendorSearchQuery("");
     setVendorAgencyFilter("all");
     setVendorCategoryFilter("all");
+    setGrantLoanSearchQuery("");
+    setGrantorFilter("all");
+    setGrantLoanCategoryFilter("all");
+    setGrantLoanZipFilter("all");
     setCapitalSearchQuery("");
     setCapitalAgencyFilter("all");
     setCapitalCountyFilter("all");
@@ -3180,12 +3872,16 @@ export default function App() {
     setVendorPaymentYears([]);
     setSelectedVendorYear("");
     setVendorPaymentDetail(null);
+    setGrantLoanYears([]);
+    setSelectedGrantLoanYear("");
+    setGrantLoanDetail(null);
     setCapitalProjectYears([]);
     setSelectedCapitalYear("");
     setCapitalProjectDetail(null);
     setSourceMetadata(DEFAULT_SOURCE_METADATA);
     setErrorMessage("");
     setVendorErrorMessage("");
+    setGrantLoanErrorMessage("");
     setCapitalErrorMessage("");
     setTraceMessage("");
     setTraceRow(null);
@@ -3193,6 +3889,8 @@ export default function App() {
     setLoadingDetail(false);
     setLoadingVendorYears(false);
     setLoadingVendorPayments(false);
+    setLoadingGrantLoanYears(false);
+    setLoadingGrantLoans(false);
     setLoadingCapitalYears(false);
     setLoadingCapitalProjects(false);
     resetFilters();
@@ -3219,6 +3917,9 @@ export default function App() {
     } else if (value === "vendor_payments") {
       setAnalysisMode("payments");
       setCoverageSourceId("vendor-payments");
+    } else if (value === "grants_loans") {
+      setAnalysisMode("grants");
+      setCoverageSourceId("grants-loans");
     } else if (value === "capital_projects") {
       setAnalysisMode("capital");
       setCoverageSourceId("capital-budget");
@@ -3226,6 +3927,7 @@ export default function App() {
       analysisMode === "accountability" ||
       analysisMode === "coverage" ||
       analysisMode === "payments" ||
+      analysisMode === "grants" ||
       analysisMode === "capital"
     ) {
       setAnalysisMode("overview");
@@ -3262,6 +3964,14 @@ export default function App() {
       return;
     }
 
+    if (value === "grants") {
+      if (questionMode !== "grants_loans") {
+        setQuestionMode("grants_loans");
+      }
+      setCoverageSourceId("grants-loans");
+      return;
+    }
+
     if (value === "capital") {
       if (questionMode !== "capital_projects") {
         setQuestionMode("capital_projects");
@@ -3283,6 +3993,7 @@ export default function App() {
 
     if (
       questionMode === "vendor_payments" ||
+      questionMode === "grants_loans" ||
       questionMode === "capital_projects" ||
       questionMode === "education_outcomes"
     ) {
@@ -3499,6 +4210,128 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    const needsGrantLoans =
+      questionMode === "grants_loans" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile";
+
+    if (!activeStateCode || !needsGrantLoans) return undefined;
+
+    const controller = new AbortController();
+
+    async function loadGrantLoanYears() {
+      setLoadingGrantLoanYears(true);
+      setGrantLoanErrorMessage("");
+
+      try {
+        const payload = await fetchGrantLoanYears(controller.signal);
+        const years = payload.years;
+
+        if (!years.length) {
+          throw new Error("No Maryland grant and loan years were returned.");
+        }
+
+        setGrantLoanYears(years);
+        const requestedYear = years.find(
+          (year) =>
+            String(year.fiscalYear) === String(initialGrantLoanYearRequest) ||
+            String(year.fiscalYear) === String(selectedYear)
+        );
+        setSelectedGrantLoanYear(String((requestedYear || years[0]).fiscalYear));
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setGrantLoanErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingGrantLoanYears(false);
+      }
+    }
+
+    loadGrantLoanYears();
+
+    return () => controller.abort();
+  }, [
+    activeStateCode,
+    analysisMode,
+    initialGrantLoanYearRequest,
+    questionMode,
+    selectedYear,
+  ]);
+
+  useEffect(() => {
+    const needsGrantLoans =
+      questionMode === "grants_loans" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile";
+
+    if (!activeStateCode || !needsGrantLoans || !selectedGrantLoanYear) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+
+    async function loadGrantLoans() {
+      setGrantLoanDetail(null);
+      setLoadingGrantLoans(true);
+      setGrantLoanErrorMessage("");
+      setTraceMessage("");
+      setTraceRow(null);
+
+      try {
+        const detail = await fetchGrantLoanDetail(
+          {
+            fiscalYear: Number(selectedGrantLoanYear),
+            searchQuery:
+              ["compare", "reconcile"].includes(analysisMode)
+                ? ""
+                : grantLoanSearchQuery,
+            grantorFilter:
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : grantorFilter,
+            categoryFilter:
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : grantLoanCategoryFilter,
+            zipCodeFilter:
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : grantLoanZipFilter,
+          },
+          controller.signal
+        );
+
+        if (!detail) {
+          throw new Error(
+            `No grant and loan detail was returned for FY ${selectedGrantLoanYear}.`
+          );
+        }
+
+        setGrantLoanDetail(detail);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setGrantLoanErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingGrantLoans(false);
+      }
+    }
+
+    loadGrantLoans();
+
+    return () => controller.abort();
+  }, [
+    activeStateCode,
+    analysisMode,
+    grantLoanCategoryFilter,
+    grantLoanSearchQuery,
+    grantLoanZipFilter,
+    grantorFilter,
+    questionMode,
+    selectedGrantLoanYear,
+  ]);
+
+  useEffect(() => {
     const needsCapitalProjects =
       questionMode === "capital_projects" ||
       analysisMode === "compare" ||
@@ -3647,6 +4480,7 @@ export default function App() {
       analysisMode === "compare" ||
       analysisMode === "reconcile" ||
       questionMode === "vendor_payments" ||
+      questionMode === "grants_loans" ||
       questionMode === "capital_projects"
     ) {
       params.set("source", coverageSourceId);
@@ -3665,6 +4499,30 @@ export default function App() {
       }
       if (questionMode === "vendor_payments" && vendorCategoryFilter !== "all") {
         params.set("vendorCategory", vendorCategoryFilter);
+      }
+    }
+    if (
+      questionMode === "grants_loans" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile"
+    ) {
+      if (selectedGrantLoanYear) {
+        params.set("grantLoanYear", selectedGrantLoanYear);
+      }
+      if (questionMode === "grants_loans" && grantLoanSearchQuery.trim()) {
+        params.set("grantSearch", grantLoanSearchQuery.trim());
+      }
+      if (questionMode === "grants_loans" && grantorFilter !== "all") {
+        params.set("grantor", grantorFilter);
+      }
+      if (
+        questionMode === "grants_loans" &&
+        grantLoanCategoryFilter !== "all"
+      ) {
+        params.set("grantCategory", grantLoanCategoryFilter);
+      }
+      if (questionMode === "grants_loans" && grantLoanZipFilter !== "all") {
+        params.set("grantZip", grantLoanZipFilter);
       }
     }
     if (
@@ -3727,10 +4585,15 @@ export default function App() {
     categoryFilter,
     coverageSourceId,
     fundFilter,
+    grantLoanCategoryFilter,
+    grantLoanSearchQuery,
+    grantLoanZipFilter,
+    grantorFilter,
     questionMode,
     rowLimit,
     searchQuery,
     selectedCapitalYear,
+    selectedGrantLoanYear,
     selectedYear,
     sortMode,
     selectedVendorYear,
@@ -3844,15 +4707,16 @@ export default function App() {
     ...metadata,
     coverage:
       analysisMode === "reconcile"
-        ? "This reconciliation view matches connected Maryland operating-budget agencies, vendor-payment agency summaries, and FY 2027 enacted capital-budget agency/project rows using normalized published labels."
-        : "This comparison uses connected Maryland operating-budget allocations, vendor-payment summaries, and FY 2027 enacted capital-budget project/program authorizations while keeping source definitions separate.",
+        ? "This reconciliation view matches connected Maryland operating-budget agencies, vendor-payment agency summaries, grant/loan grantor summaries, and FY 2027 enacted capital-budget agency/project rows using normalized published labels."
+        : "This comparison uses connected Maryland operating-budget allocations, vendor-payment summaries, grants/loans, and FY 2027 enacted capital-budget project/program authorizations while keeping source definitions separate.",
     confidenceReason:
       analysisMode === "reconcile"
         ? "Official Maryland sources are connected; match confidence reflects label alignment and source coverage rather than audited accounting reconciliation."
-        : "Official Maryland sources are connected for the operating-budget, vendor-payment, and capital-budget comparison streams.",
+        : "Official Maryland sources are connected for the operating-budget, vendor-payment, grants/loans, and capital-budget comparison streams.",
     knownExclusions: [
       "Audited payment-to-program reconciliation keys",
       "Procurement contract identifiers matched to every payment",
+      "Recipient-level grant/loan awards below the $50,000 reporting threshold",
       "Capital project-to-vendor payment matching",
       "Local school district and local government ledgers",
       "Capital-project years beyond the connected FY 2027 enacted document",
@@ -3863,18 +4727,24 @@ export default function App() {
       ? comparisonMetadata
       : questionMode === "vendor_payments"
       ? vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA
+      : questionMode === "grants_loans"
+        ? grantLoanDetail?.metadata || DEFAULT_GRANTS_LOANS_METADATA
       : questionMode === "capital_projects"
         ? capitalProjectDetail?.metadata || DEFAULT_CAPITAL_PROJECT_METADATA
       : metadata;
   const displaySourceLastUpdated =
     questionMode === "vendor_payments"
       ? displayMetadata.dataLastUpdated || VENDOR_PAYMENTS_LAST_UPDATED
+      : questionMode === "grants_loans"
+        ? displayMetadata.dataLastUpdated || GRANTS_LOANS_LAST_UPDATED
       : questionMode === "capital_projects"
         ? displayMetadata.dataLastUpdated || CAPITAL_PROJECTS_LAST_UPDATED
       : SOURCE_LAST_MODIFIED;
   const displayMetadataUpdated =
     questionMode === "vendor_payments"
       ? displayMetadata.metadataUpdated || VENDOR_PAYMENTS_METADATA_UPDATED
+      : questionMode === "grants_loans"
+        ? displayMetadata.metadataUpdated || GRANTS_LOANS_METADATA_UPDATED
       : questionMode === "capital_projects"
         ? displayMetadata.metadataUpdated || CAPITAL_PROJECTS_METADATA_UPDATED
       : SOURCE_METADATA_UPDATED;
@@ -3883,6 +4753,7 @@ export default function App() {
     QUESTION_OPTIONS[0];
   const hidesAllocationTable =
     questionMode === "vendor_payments" ||
+    questionMode === "grants_loans" ||
     questionMode === "capital_projects" ||
     questionMode === "education_outcomes";
   const showsAllocationViews =
@@ -3899,6 +4770,10 @@ export default function App() {
     vendorSearchQuery.trim() ||
     vendorAgencyFilter !== "all" ||
     vendorCategoryFilter !== "all" ||
+    grantLoanSearchQuery.trim() ||
+    grantorFilter !== "all" ||
+    grantLoanCategoryFilter !== "all" ||
+    grantLoanZipFilter !== "all" ||
     capitalSearchQuery.trim() ||
     capitalAgencyFilter !== "all" ||
     capitalCountyFilter !== "all" ||
@@ -4006,6 +4881,63 @@ export default function App() {
     setTraceMessage(`Exported ${payments.length} grouped vendor-payment rows as CSV.`);
   }
 
+  function exportGrantLoanCsv() {
+    const awards = grantLoanDetail?.awards || [];
+
+    if (!awards.length) return;
+
+    const headers = [
+      "Fiscal Year",
+      "Grantor",
+      "Agency",
+      "Recipient",
+      "Recipient ZIP",
+      "Category",
+      "Description",
+      "Fiscal Period",
+      "Date",
+      "Amount",
+      "% Grant/Loan Total",
+      "Award Rows",
+      "Source",
+      "Confidence",
+      "Notes",
+    ];
+    const lines = [
+      headers.map(csvEscape).join(","),
+      ...awards.map((award) =>
+        [
+          award.fiscalYear,
+          award.grantor,
+          award.agencyName,
+          award.granteeName,
+          award.recipientZip,
+          award.category,
+          award.description,
+          award.fiscalPeriod,
+          award.date,
+          award.dollarAmount,
+          award.percentage.toFixed(4),
+          award.awardCount,
+          award.sourceLabel,
+          award.confidence,
+          award.notes,
+        ]
+          .map(csvEscape)
+          .join(",")
+      ),
+    ];
+    const csv = lines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `maryland-grants-loans-fy-${selectedGrantLoanYear}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setTraceMessage(`Exported ${awards.length} grouped grant/loan rows as CSV.`);
+  }
+
   function exportCapitalProjectCsv() {
     const projects = capitalProjectDetail?.projects || [];
 
@@ -4103,6 +5035,11 @@ export default function App() {
     setTraceMessage(`Trace opened for ${payment.vendorName}.`);
   }
 
+  function handleGrantLoanTrace(award) {
+    setTraceRow(buildGrantLoanTraceRow(award, grantLoanDetail));
+    setTraceMessage(`Trace opened for ${award.granteeName}.`);
+  }
+
   function handleCapitalTrace(project) {
     setTraceRow(buildCapitalTraceRow(project, capitalProjectDetail));
     setTraceMessage(`Trace opened for ${project.projectTitle}.`);
@@ -4133,6 +5070,20 @@ export default function App() {
     setTraceRow(null);
   }
 
+  function openGrantLoanAgencyRows(grantorName) {
+    if (!grantorName) return;
+
+    setQuestionMode("grants_loans");
+    setAnalysisMode("grants");
+    setCoverageSourceId("grants-loans");
+    setGrantLoanSearchQuery("");
+    setGrantorFilter(grantorName);
+    setGrantLoanCategoryFilter("all");
+    setGrantLoanZipFilter("all");
+    setTraceMessage(`Grant and loan rows filtered to ${grantorName}.`);
+    setTraceRow(null);
+  }
+
   function openCapitalAgencyRows(agencyName) {
     if (!agencyName) return;
 
@@ -4157,6 +5108,8 @@ export default function App() {
         ? "agency reconciliation"
       : questionMode === "vendor_payments"
       ? "vendor payments"
+      : questionMode === "grants_loans"
+        ? "grants and loans"
       : questionMode === "capital_projects"
         ? "capital budget"
         : "operating budget";
@@ -4167,16 +5120,20 @@ export default function App() {
         ? `${activeStateName} Agency Reconciliation`
       : questionMode === "vendor_payments"
       ? `${activeStateName} Vendor Payments`
+      : questionMode === "grants_loans"
+        ? `${activeStateName} Grants And Loans`
       : questionMode === "capital_projects"
         ? `${activeStateName} Capital Projects`
         : `${activeStateName} Operating Budget`;
   const heroDescription =
     analysisMode === "compare"
-      ? "Compare operating-budget allocations, official vendor-payment records, and enacted capital-budget authorizations while keeping each source's definition visible."
+      ? "Compare operating-budget allocations, official vendor-payment records, grants/loans, and enacted capital-budget authorizations while keeping each source's definition visible."
       : analysisMode === "reconcile"
-        ? "Match agency labels across operating-budget allocations, vendor-payment records, and capital-project authorizations with confidence flags and source-specific drill-ins."
+        ? "Match agency labels across operating-budget allocations, vendor-payment records, grants/loans, and capital-project authorizations with confidence flags and source-specific drill-ins."
       : questionMode === "vendor_payments"
       ? "Explore official vendor-payment records beside operating-budget context without mixing transaction data into budget allocations."
+      : questionMode === "grants_loans"
+        ? "Explore official grant and loan recipient records beside operating-budget context without mixing State Aid assistance records into budget allocations."
       : questionMode === "capital_projects"
         ? "Explore enacted capital-budget projects and programs beside operating-budget context without mixing long-term authorizations into recurring allocations."
         : "Explore official operating-budget allocations by year, stage, agency, program, category, and fund type. Education outcomes are connected through official MSDE and NCES/NAEP releases, and broader budget sources are mapped separately.";
@@ -4190,8 +5147,9 @@ export default function App() {
             <h1>Choose a state budget to explore</h1>
             <p>
               Explore official state budget allocations and prepare them for
-              comparison with public outcomes. Maryland operating-budget and
-              education outcome context are connected first.
+              comparison with public outcomes. Maryland operating-budget,
+              vendor-payment, grant/loan, capital-project, and education
+              outcome context are connected first.
             </p>
           </div>
 
@@ -4271,6 +5229,12 @@ export default function App() {
               <StageBadge stage={`FY ${selectedVendorYear}`} />
             </>
           )}
+          {questionMode === "grants_loans" && selectedGrantLoanYear && (
+            <>
+              <span>Grant/loan fiscal year</span>
+              <StageBadge stage={`FY ${selectedGrantLoanYear}`} />
+            </>
+          )}
           {questionMode === "capital_projects" && selectedCapitalYear && (
             <>
               <span>Capital fiscal year</span>
@@ -4278,6 +5242,7 @@ export default function App() {
             </>
           )}
           {questionMode !== "vendor_payments" &&
+            questionMode !== "grants_loans" &&
             questionMode !== "capital_projects" &&
             budgetDetail?.budgetStage && (
             <>
@@ -4470,7 +5435,11 @@ export default function App() {
         analysisMode={analysisMode}
       />
 
-      {(loadingYears || loadingDetail || loadingVendorYears || loadingCapitalYears) && (
+      {(loadingYears ||
+        loadingDetail ||
+        loadingVendorYears ||
+        loadingGrantLoanYears ||
+        loadingCapitalYears) && (
         <section className="loading-panel" aria-live="polite">
           <div className="spinner" />
           <p>
@@ -4478,6 +5447,8 @@ export default function App() {
               ? "Loading fiscal years..."
               : loadingVendorYears
                 ? "Loading vendor-payment fiscal years..."
+                : loadingGrantLoanYears
+                  ? "Loading grant/loan fiscal years..."
                 : loadingCapitalYears
                   ? "Loading capital-project fiscal years..."
                   : `Loading FY ${selectedYear} allocations...`}
@@ -4498,6 +5469,8 @@ export default function App() {
                   ? "Agency reconciliation"
                   : questionMode === "vendor_payments"
                 ? "Vendor payments"
+                : questionMode === "grants_loans"
+                  ? "Grants and loans"
                 : questionMode === "capital_projects"
                   ? "Capital projects"
                 : budgetDetail.budgetStage
@@ -4511,6 +5484,8 @@ export default function App() {
                 ? "Budget agency reconciliation summary"
                 : questionMode === "vendor_payments"
                 ? "Budget and vendor payment summary"
+                : questionMode === "grants_loans"
+                  ? "Budget and grants/loans summary"
                 : questionMode === "capital_projects"
                   ? "Budget and capital project summary"
                 : "Budget summary"
@@ -4520,6 +5495,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? `FY ${budgetDetail.fiscalYear} operating-budget total`
+                  : questionMode === "grants_loans"
+                    ? `FY ${budgetDetail.fiscalYear} operating-budget total`
                   : questionMode === "capital_projects"
                     ? `FY ${budgetDetail.fiscalYear} operating-budget total`
                   : `FY ${budgetDetail.fiscalYear} positive budget total`
@@ -4531,6 +5508,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Operating-budget line items"
+                  : questionMode === "grants_loans"
+                    ? "Operating-budget line items"
                   : questionMode === "capital_projects"
                     ? "Operating-budget line items"
                   : "Source line items"
@@ -4542,6 +5521,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Grouped budget allocations returned"
+                  : questionMode === "grants_loans"
+                    ? "Grouped budget allocations returned"
                   : questionMode === "capital_projects"
                     ? "Grouped budget allocations returned"
                   : "Grouped allocations returned"
@@ -4555,6 +5536,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Operating-budget stage"
+                  : questionMode === "grants_loans"
+                    ? "Operating-budget stage"
                   : questionMode === "capital_projects"
                     ? "Operating-budget stage"
                   : "Budget stage"
@@ -4566,6 +5549,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? `FY ${selectedVendorYear || "selected"} vendor-payment total`
+                  : questionMode === "grants_loans"
+                    ? `FY ${selectedGrantLoanYear || "selected"} grant/loan total`
                   : questionMode === "capital_projects"
                     ? `FY ${selectedCapitalYear || "selected"} capital total`
                   : "Current filter total"
@@ -4573,6 +5558,8 @@ export default function App() {
               value={
                 questionMode === "vendor_payments"
                   ? formatMoney(vendorPaymentDetail?.totalAmount || 0)
+                  : questionMode === "grants_loans"
+                    ? formatMoney(grantLoanDetail?.totalAmount || 0)
                   : questionMode === "capital_projects"
                     ? formatMoney(capitalProjectDetail?.totalAmount || 0)
                   : formatMoney(filteredTotal)
@@ -4590,6 +5577,12 @@ export default function App() {
                           capitalProjectDetail.rowCount
                         )} capital rows in normalized source`
                       : "Capital projects load from the separate source below"
+                  : questionMode === "grants_loans"
+                    ? grantLoanDetail
+                      ? `${formatNumber(
+                          grantLoanDetail.rowCount
+                        )} grant/loan rows in official source`
+                      : "Grants and loans load from the separate source below"
                   : `${formatNumber(filteredRows.length)} matching allocations`
               }
             />
@@ -4622,6 +5615,13 @@ export default function App() {
               loadingVendorYears={loadingVendorYears}
               loadingVendorPayments={loadingVendorPayments}
               vendorErrorMessage={vendorErrorMessage}
+              grantLoanYears={grantLoanYears}
+              selectedGrantLoanYear={selectedGrantLoanYear}
+              onSelectedGrantLoanYearChange={setSelectedGrantLoanYear}
+              grantLoanDetail={grantLoanDetail}
+              loadingGrantLoanYears={loadingGrantLoanYears}
+              loadingGrantLoans={loadingGrantLoans}
+              grantLoanErrorMessage={grantLoanErrorMessage}
               capitalProjectYears={capitalProjectYears}
               selectedCapitalYear={selectedCapitalYear}
               onSelectedCapitalYearChange={setSelectedCapitalYear}
@@ -4643,6 +5643,13 @@ export default function App() {
               loadingVendorYears={loadingVendorYears}
               loadingVendorPayments={loadingVendorPayments}
               vendorErrorMessage={vendorErrorMessage}
+              grantLoanYears={grantLoanYears}
+              selectedGrantLoanYear={selectedGrantLoanYear}
+              onSelectedGrantLoanYearChange={setSelectedGrantLoanYear}
+              grantLoanDetail={grantLoanDetail}
+              loadingGrantLoanYears={loadingGrantLoanYears}
+              loadingGrantLoans={loadingGrantLoans}
+              grantLoanErrorMessage={grantLoanErrorMessage}
               capitalProjectYears={capitalProjectYears}
               selectedCapitalYear={selectedCapitalYear}
               onSelectedCapitalYearChange={setSelectedCapitalYear}
@@ -4652,6 +5659,7 @@ export default function App() {
               capitalErrorMessage={capitalErrorMessage}
               onOpenOperatingAgency={openOperatingAgencyRows}
               onOpenVendorAgency={openVendorAgencyRows}
+              onOpenGrantLoanAgency={openGrantLoanAgencyRows}
               onOpenCapitalAgency={openCapitalAgencyRows}
             />
           )}
@@ -4672,6 +5680,29 @@ export default function App() {
               errorMessage={vendorErrorMessage}
               onTracePayment={handleVendorTrace}
               onExportPayments={exportVendorPaymentCsv}
+              onCopyCitation={copySourceCitation}
+              onCopyViewLink={copyViewLink}
+            />
+          )}
+
+          {(analysisMode === "grants" || questionMode === "grants_loans") && (
+            <GrantsLoansPanel
+              grantLoanYears={grantLoanYears}
+              selectedGrantLoanYear={selectedGrantLoanYear}
+              onSelectedGrantLoanYearChange={setSelectedGrantLoanYear}
+              grantLoanSearchQuery={grantLoanSearchQuery}
+              onGrantLoanSearchQueryChange={setGrantLoanSearchQuery}
+              grantorFilter={grantorFilter}
+              onGrantorFilterChange={setGrantorFilter}
+              grantLoanCategoryFilter={grantLoanCategoryFilter}
+              onGrantLoanCategoryFilterChange={setGrantLoanCategoryFilter}
+              grantLoanZipFilter={grantLoanZipFilter}
+              onGrantLoanZipFilterChange={setGrantLoanZipFilter}
+              grantLoanDetail={grantLoanDetail}
+              loading={loadingGrantLoans}
+              errorMessage={grantLoanErrorMessage}
+              onTraceAward={handleGrantLoanTrace}
+              onExportAwards={exportGrantLoanCsv}
               onCopyCitation={copySourceCitation}
               onCopyViewLink={copyViewLink}
             />
@@ -4849,8 +5880,7 @@ export default function App() {
           </section>
           )}
 
-          {questionMode !== "vendor_payments" &&
-            questionMode !== "capital_projects" && (
+          {showsAllocationViews && (
             <footer className="data-note">
               {metadata.limitations.join(" ")}
               {budgetDetail.isAllocationCapped
@@ -4868,22 +5898,46 @@ export default function App() {
             budgetDetail={budgetDetail}
             filters={{
               searchQuery:
-                questionMode === "capital_projects"
+                questionMode === "grants_loans"
+                  ? grantLoanSearchQuery
+                  : questionMode === "vendor_payments"
+                    ? vendorSearchQuery
+                  : questionMode === "capital_projects"
                   ? capitalSearchQuery
                   : searchQuery,
               agencyFilter:
-                questionMode === "capital_projects"
+                questionMode === "grants_loans"
+                  ? grantorFilter
+                  : questionMode === "vendor_payments"
+                    ? vendorAgencyFilter
+                  : questionMode === "capital_projects"
                   ? capitalAgencyFilter
                   : agencyFilter,
               fundFilter:
-                questionMode === "capital_projects"
+                questionMode === "grants_loans"
+                  ? grantLoanZipFilter
+                  : questionMode === "capital_projects"
                   ? capitalFundTypeFilter
                   : fundFilter,
               budgetStageFilter,
               categoryFilter:
-                questionMode === "capital_projects"
+                questionMode === "grants_loans"
+                  ? grantLoanCategoryFilter
+                  : questionMode === "vendor_payments"
+                    ? vendorCategoryFilter
+                  : questionMode === "capital_projects"
                   ? capitalCategoryFilter
                   : categoryFilter,
+              traceContext:
+                questionMode === "grants_loans"
+                  ? "grants"
+                  : questionMode === "vendor_payments"
+                    ? "vendor"
+                    : questionMode === "capital_projects"
+                      ? "capital"
+                      : "operating",
+              grantLoanZipFilter:
+                questionMode === "grants_loans" ? grantLoanZipFilter : undefined,
               capitalCountyFilter:
                 questionMode === "capital_projects"
                   ? capitalCountyFilter

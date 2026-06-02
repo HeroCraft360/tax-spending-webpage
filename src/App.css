@@ -639,6 +639,7 @@ button:focus {
 .trend-panel,
 .comparison-panel,
 .vendor-payment-section,
+.grant-loan-section,
 .vendor-overview-panel {
   margin-bottom: 20px;
 }
@@ -1001,7 +1002,12 @@ button:focus {
   align-items: end;
 }
 
-.source-compare-grid,
+.source-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+
 .comparison-rule-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1129,7 +1135,7 @@ button:focus {
 }
 
 .reconciliation-table {
-  min-width: 980px;
+  min-width: 1220px;
 }
 
 .reconciliation-table .selected-row {
@@ -1261,7 +1267,8 @@ button:focus {
   overflow-wrap: anywhere;
 }
 
-.vendor-controls {
+.vendor-controls,
+.grant-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 14px;
