@@ -985,6 +985,124 @@ button:focus {
   font-size: 22px;
 }
 
+.comparison-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.comparison-panel > .panel-heading {
+  margin-bottom: 0;
+}
+
+.comparison-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
+.source-compare-grid,
+.comparison-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.source-compare-card,
+.comparison-rule-grid article,
+.agency-comparison-panel {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #d9dee5;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.comparison-rule-grid article,
+.agency-comparison-panel {
+  background: #f8fafc;
+}
+
+.source-compare-card {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.source-compare-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.source-compare-top span,
+.source-compare-note span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.source-compare-card h3,
+.comparison-rule-grid h3,
+.agency-comparison-panel h3 {
+  margin: 0;
+  color: #111827;
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.source-compare-card h3 {
+  margin-top: 4px;
+}
+
+.source-compare-card > strong {
+  color: #111827;
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.source-compare-card p,
+.comparison-rule-grid p,
+.agency-comparison-panel p {
+  margin: 0;
+  color: #4b5563;
+  line-height: 1.5;
+}
+
+.source-compare-card a {
+  min-width: 0;
+  color: #0f766e;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.source-compare-note {
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.agency-comparison-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.agency-comparison-panel .panel-heading {
+  margin-bottom: 0;
+}
+
+.compact-table-wrap {
+  max-height: 420px;
+}
+
+.agency-comparison-table {
+  min-width: 760px;
+}
+
 .vendor-source-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -1262,7 +1380,9 @@ td:nth-child(10) {
 
   .coverage-layout,
   .coverage-step-list,
-  .source-buildout-grid {
+  .source-buildout-grid,
+  .source-compare-grid,
+  .comparison-rule-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1296,11 +1416,12 @@ td:nth-child(10) {
   .metrics-grid,
   .mode-tabs,
   .accountability-grid,
-  .accountability-summary-grid,
-  .coverage-summary-grid,
-  .evidence-panel,
-  .source-task-grid,
-  .trace-drawer-grid,
+    .accountability-summary-grid,
+    .coverage-summary-grid,
+    .comparison-controls,
+    .evidence-panel,
+    .source-task-grid,
+    .trace-drawer-grid,
   .trace-filter-grid,
   .trend-row {
     grid-template-columns: 1fr;

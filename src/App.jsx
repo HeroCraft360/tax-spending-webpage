@@ -54,7 +54,7 @@ const ANALYSIS_MODES = [
   },
   {
     value: "compare",
-    label: "Compare",
+    label: "Compare Sources",
   },
   {
     value: "payments",
@@ -419,10 +419,17 @@ function getCoverageScoreSummary() {
     (sum, source) => sum + (source.coverageScore || 0),
     0
   );
-  const averageScore = Math.round(totalScore / BUDGET_COVERAGE_SOURCES.length);
-  const liveScore = BUDGET_COVERAGE_SOURCES.filter(
+  const liveSources = BUDGET_COVERAGE_SOURCES.filter(
     (source) => source.status === "Live"
-  ).reduce((sum, source) => sum + (source.coverageScore || 0), 0);
+  );
+  const liveTotalScore = liveSources.reduce(
+    (sum, source) => sum + (source.coverageScore || 0),
+    0
+  );
+  const averageScore = Math.round(totalScore / BUDGET_COVERAGE_SOURCES.length);
+  const liveScore = liveSources.length
+    ? Math.round(liveTotalScore / liveSources.length)
+    : 0;
 
   return {
     averageScore,
@@ -629,17 +636,24 @@ function DataCoveragePanels({ metadata, budgetStage }) {
   );
 }
 
-function QuestionNotice({ questionMode, selectedYearLabel }) {
+function QuestionNotice({ questionMode, selectedYearLabel, analysisMode }) {
+  const notice =
+    analysisMode === "compare"
+      ? "Compare Sources keeps operating-budget allocations, vendor payments, and capital authorizations separate so scale checks do not imply a single reconciled total."
+      : getQuestionNotice(questionMode, selectedYearLabel);
+
   return (
     <section
       className={
-        questionMode === "vendor_payments" || questionMode === "education_outcomes"
+        analysisMode === "compare" ||
+        questionMode === "vendor_payments" ||
+        questionMode === "education_outcomes"
           ? "question-notice warning"
           : "question-notice"
       }
       aria-live="polite"
     >
-      {getQuestionNotice(questionMode, selectedYearLabel)}
+      {notice}
     </section>
   );
 }
@@ -830,7 +844,26 @@ function EfficiencyPanel({ budgetDetail }) {
   );
 }
 
-function ComparisonPanel({ budgetDetail, budgetYears, filteredRows, selectedYear }) {
+function ComparisonPanel({
+  budgetDetail,
+  budgetYears,
+  filteredRows,
+  selectedYear,
+  vendorPaymentYears,
+  selectedVendorYear,
+  onSelectedVendorYearChange,
+  vendorPaymentDetail,
+  loadingVendorYears,
+  loadingVendorPayments,
+  vendorErrorMessage,
+  capitalProjectYears,
+  selectedCapitalYear,
+  onSelectedCapitalYearChange,
+  capitalProjectDetail,
+  loadingCapitalYears,
+  loadingCapitalProjects,
+  capitalErrorMessage,
+}) {
   const previousYear = getPreviousYearSummary(budgetYears, selectedYear);
   const selectedYearSummary = budgetYears.find(
     (year) => String(year.fiscalYear) === String(selectedYear)
@@ -850,19 +883,226 @@ function ComparisonPanel({ budgetDetail, budgetYears, filteredRows, selectedYear
     budgetDetail.totalAmount > 0 ? (filteredTotal / budgetDetail.totalAmount) * 100 : 0;
   const { educationTotal, educationShare } = getEducationSpendContext(budgetDetail);
   const coverageScore = getCoverageScoreSummary();
+  const vendorMetadata =
+    vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA;
+  const capitalMetadata =
+    capitalProjectDetail?.metadata || DEFAULT_CAPITAL_PROJECT_METADATA;
+  const loadingVendorComparison = loadingVendorYears || loadingVendorPayments;
+  const loadingCapitalComparison = loadingCapitalYears || loadingCapitalProjects;
+  const vendorScale =
+    budgetDetail.totalAmount > 0 && vendorPaymentDetail?.totalAmount
+      ? (vendorPaymentDetail.totalAmount / budgetDetail.totalAmount) * 100
+      : 0;
+  const capitalScale =
+    budgetDetail.totalAmount > 0 && capitalProjectDetail?.totalAmount
+      ? (capitalProjectDetail.totalAmount / budgetDetail.totalAmount) * 100
+      : 0;
+  const operatingAgencyRows = getGroupedTotals(
+    filteredRows,
+    "agencyName",
+    filteredTotal || budgetDetail.totalAmount,
+    100
+  );
+  const vendorAgencyRows = vendorPaymentDetail?.topAgencies || [];
+  const capitalAgencyRows = capitalProjectDetail?.topAgencies || [];
+  const normalizeAgencyName = (value) =>
+    String(value || "")
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const findAgencyRow = (rows, key) =>
+    rows.find((row) => normalizeAgencyName(row.name) === key);
+  const agencyMap = new Map();
+  const addAgencyRows = (rows, preferDisplayName = false) => {
+    rows.slice(0, 5).forEach((row) => {
+      const key = normalizeAgencyName(row.name);
+      if (!key) return;
+      if (!agencyMap.has(key) || preferDisplayName) {
+        agencyMap.set(key, row.name);
+      }
+    });
+  };
+
+  addAgencyRows(operatingAgencyRows, true);
+  addAgencyRows(vendorAgencyRows);
+  addAgencyRows(capitalAgencyRows);
+
+  const agencyComparisonRows = [...agencyMap.entries()]
+    .slice(0, 10)
+    .map(([key, name]) => ({
+      name,
+      operating: findAgencyRow(operatingAgencyRows, key),
+      vendor: findAgencyRow(vendorAgencyRows, key),
+      capital: findAgencyRow(capitalAgencyRows, key),
+    }));
+  const topOperatingRow = [...filteredRows].sort(
+    (a, b) => b.dollarAmount - a.dollarAmount
+  )[0];
+  const topVendor = vendorPaymentDetail?.topVendors?.[0];
+  const topCapitalProject = capitalProjectDetail?.projects?.[0];
+  const sourceCards = [
+    {
+      id: "operating",
+      label: "Operating budget",
+      yearLabel: `FY ${budgetDetail.fiscalYear}`,
+      amount: budgetDetail.totalAmount,
+      status: "Live",
+      sourceLabel: budgetDetail.metadata?.sourceLabel || SOURCE_LABEL,
+      sourceUrl: budgetDetail.metadata?.sourceUrl || SOURCE_URL,
+      rowDetail: `${formatNumber(budgetDetail.rowCount)} source line items`,
+      primarySignal: topOperatingRow
+        ? `${topOperatingRow.programName}: ${formatMoney(
+            topOperatingRow.dollarAmount
+          )}`
+        : "No operating rows in the current view",
+      explains:
+        "Planned appropriations for programs, agencies, budget stages, fund types, and recurring services.",
+      guardrail:
+        "It does not show every vendor paid or every long-term construction/project authorization.",
+    },
+    {
+      id: "payments",
+      label: "Vendor payments",
+      yearLabel: selectedVendorYear ? `FY ${selectedVendorYear}` : "Loading",
+      amount: vendorPaymentDetail?.totalAmount || 0,
+      status: vendorErrorMessage
+        ? "Error"
+        : loadingVendorComparison
+          ? "Loading"
+          : vendorPaymentDetail
+            ? "Live"
+            : "Waiting",
+      sourceLabel: vendorMetadata.sourceLabel,
+      sourceUrl: vendorMetadata.sourceUrl,
+      rowDetail: vendorPaymentDetail
+        ? `${formatNumber(vendorPaymentDetail.rowCount)} payment rows`
+        : "Separate official payment source",
+      primarySignal: topVendor
+        ? `${topVendor.name}: ${formatMoney(topVendor.dollarAmount)}`
+        : "Top vendor loads with the payment source",
+      explains:
+        "Actual payment activity by fiscal year, agency, vendor, category/code, ZIP, and amount.",
+      guardrail:
+        "It is not the budget plan, and current-year records can be partial or excluded by portal rules.",
+      errorMessage: vendorErrorMessage,
+      loading: loadingVendorComparison,
+    },
+    {
+      id: "capital",
+      label: "Capital projects",
+      yearLabel: selectedCapitalYear ? `FY ${selectedCapitalYear}` : "Loading",
+      amount: capitalProjectDetail?.totalAmount || 0,
+      status: capitalErrorMessage
+        ? "Error"
+        : loadingCapitalComparison
+          ? "Loading"
+          : capitalProjectDetail
+            ? "Live"
+            : "Waiting",
+      sourceLabel: capitalMetadata.sourceLabel,
+      sourceUrl: capitalMetadata.sourceUrl,
+      rowDetail: capitalProjectDetail
+        ? `${formatNumber(capitalProjectDetail.rowCount)} normalized rows`
+        : "Separate enacted capital-budget source",
+      primarySignal: topCapitalProject
+        ? `${topCapitalProject.projectTitle}: ${formatMoney(
+            topCapitalProject.dollarAmount
+          )}`
+        : "Top project loads with the capital source",
+      explains:
+        "Long-lived project and program authorizations by agency, county, category, fund type, and project type.",
+      guardrail:
+        "It is not recurring operating spend and is not proof that a vendor has been paid.",
+      errorMessage: capitalErrorMessage,
+      loading: loadingCapitalComparison,
+    },
+  ];
 
   return (
     <section className="panel comparison-panel">
       <div className="panel-heading">
         <div>
-          <h2>Comparison Mode</h2>
+          <h2>Budget vs Payments vs Capital</h2>
           <p>
-            Compares the current view against the full selected-year operating
-            budget, the prior available fiscal year, education context, and
-            source coverage.
+            Compare the main public spending sources without merging unlike
+            numbers into one total. The operating budget is the plan, vendor
+            payments show payment activity, and capital projects show long-term
+            authorizations.
           </p>
         </div>
         <StageBadge stage={selectedYearSummary?.budgetStage || budgetDetail.budgetStage} />
+      </div>
+
+      <div className="comparison-controls" aria-label="Comparison controls">
+        <div className="control-field">
+          <label htmlFor="compare-payment-year">Payment fiscal year</label>
+          <select
+            id="compare-payment-year"
+            value={selectedVendorYear}
+            onChange={(event) => onSelectedVendorYearChange(event.target.value)}
+            disabled={loadingVendorYears || !vendorPaymentYears.length}
+          >
+            {vendorPaymentYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="compare-capital-year">Capital fiscal year</label>
+          <select
+            id="compare-capital-year"
+            value={selectedCapitalYear}
+            onChange={(event) => onSelectedCapitalYearChange(event.target.value)}
+            disabled={loadingCapitalYears || !capitalProjectYears.length}
+          >
+            {capitalProjectYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear} / {year.budgetStage}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="source-compare-grid">
+        {sourceCards.map((card) => (
+          <article className={`source-compare-card ${card.id}`} key={card.id}>
+            <div className="source-compare-top">
+              <div>
+                <span>{card.yearLabel}</span>
+                <h3>{card.label}</h3>
+              </div>
+              <CoverageStatusBadge status={card.status} />
+            </div>
+            <strong>
+              {card.loading
+                ? "Loading"
+                : card.errorMessage
+                  ? "Check source"
+                  : formatMoney(card.amount)}
+            </strong>
+            <p>{card.rowDetail}</p>
+            <a href={card.sourceUrl} target="_blank" rel="noreferrer">
+              {card.sourceLabel}
+            </a>
+            <div className="source-compare-note">
+              <span>Top signal</span>
+              <p>{card.primarySignal}</p>
+            </div>
+            <div className="source-compare-note">
+              <span>Best for</span>
+              <p>{card.explains}</p>
+            </div>
+            <div className="source-compare-note">
+              <span>Guardrail</span>
+              <p>{card.errorMessage || card.guardrail}</p>
+            </div>
+          </article>
+        ))}
       </div>
 
       <div className="comparison-grid">
@@ -872,13 +1112,23 @@ function ComparisonPanel({ budgetDetail, budgetYears, filteredRows, selectedYear
           detail={
             previousYear
               ? `${formatSignedPercent(previousChangePercent)} from FY ${previousYear.fiscalYear}`
-              : "No prior fiscal year in source"
+            : "No prior fiscal year in source"
           }
         />
         <MetricCard
           label="Current filtered view"
           value={formatMoney(filteredTotal)}
           detail={`${formatPercent(filteredShare)} of FY ${budgetDetail.fiscalYear}`}
+        />
+        <MetricCard
+          label="Vendor payment scale check"
+          value={vendorPaymentDetail ? formatPercent(vendorScale) : "Loading"}
+          detail={`Compared with FY ${budgetDetail.fiscalYear} operating total only`}
+        />
+        <MetricCard
+          label="Capital authorization scale check"
+          value={capitalProjectDetail ? formatPercent(capitalScale) : "Loading"}
+          detail={`Compared with FY ${budgetDetail.fiscalYear} operating total only`}
         />
         <MetricCard
           label="Education spending context"
@@ -892,6 +1142,91 @@ function ComparisonPanel({ budgetDetail, budgetYears, filteredRows, selectedYear
         />
       </div>
 
+      <div className="comparison-rule-grid">
+        <article>
+          <h3>Same dollars?</h3>
+          <p>
+            No. Operating budgets, vendor payments, and capital authorizations
+            answer different questions. The scale checks are orientation, not
+            audited reconciliations.
+          </p>
+        </article>
+        <article>
+          <h3>Same year?</h3>
+          <p>
+            Operating FY {budgetDetail.fiscalYear}, payment{" "}
+            {selectedVendorYear ? `FY ${selectedVendorYear}` : "year loading"},
+            and capital{" "}
+            {selectedCapitalYear ? `FY ${selectedCapitalYear}` : "year loading"}{" "}
+            are kept visible because fiscal years do not always cover the same
+            source status.
+          </p>
+        </article>
+        <article>
+          <h3>Same agency?</h3>
+          <p>
+            Agency names are compared as published. Rows that do not line up
+            exactly are still useful signals, but they need source-level tracing
+            before being treated as a match.
+          </p>
+        </article>
+      </div>
+
+      <section className="agency-comparison-panel">
+        <div className="panel-heading compact-heading">
+          <div>
+            <h3>Agency Overlap Signals</h3>
+            <p>
+              Top agency labels from each connected source, shown side by side
+              where the published names match.
+            </p>
+          </div>
+        </div>
+
+        {agencyComparisonRows.length ? (
+          <div className="table-wrap compact-table-wrap">
+            <table className="agency-comparison-table">
+              <thead>
+                <tr>
+                  <th>Agency label</th>
+                  <th>Operating allocations</th>
+                  <th>Vendor payments</th>
+                  <th>Capital authorizations</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agencyComparisonRows.map((row) => (
+                  <tr key={row.name}>
+                    <td>{row.name}</td>
+                    <td>
+                      {row.operating
+                        ? formatMoney(row.operating.dollarAmount)
+                        : "Not in current view"}
+                    </td>
+                    <td>
+                      {row.vendor
+                        ? formatMoney(row.vendor.dollarAmount)
+                        : vendorPaymentDetail
+                          ? "Not in top source rows"
+                          : "Loading"}
+                    </td>
+                    <td>
+                      {row.capital
+                        ? formatMoney(row.capital.dollarAmount)
+                        : capitalProjectDetail
+                          ? "Not in top source rows"
+                          : "Loading"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="empty-state">No agency comparison rows are available yet.</p>
+        )}
+      </section>
+
       <div className="benchmark-grid">
         {EDUCATION_OUTCOME_METRICS.slice(0, 4).map((metric) => (
           <article key={metric.id}>
@@ -902,6 +1237,12 @@ function ComparisonPanel({ budgetDetail, budgetYears, filteredRows, selectedYear
           </article>
         ))}
       </div>
+
+      <footer className="panel-footnote">
+        This comparison intentionally keeps source definitions separate. A future
+        reconciliation view can match agency, program, procurement, and project
+        identifiers where official records expose enough shared keys.
+      </footer>
     </section>
   );
 }
@@ -1056,7 +1397,7 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
         <MetricCard
           label="Live adapters"
           value={formatNumber(liveSources)}
-          detail="Operating budget is connected now"
+          detail={`${formatNumber(liveSources)} official source adapters connected`}
         />
         <MetricCard
           label="Average coverage score"
@@ -1142,7 +1483,7 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
               <span>Capital project explorer</span>
               <h3>Project Normalization Pipeline</h3>
             </div>
-            <CoverageStatusBadge status="Planned" />
+            <CoverageStatusBadge status="Live" />
           </div>
           <div className="mini-list">
             {CAPITAL_PROJECT_PIPELINE.map((item) => (
@@ -2118,13 +2459,20 @@ export default function App() {
   const [selectedCapitalYear, setSelectedCapitalYear] = useState("");
   const [capitalProjectDetail, setCapitalProjectDetail] = useState(null);
   const [analysisMode, setAnalysisMode] = useState(getInitialAnalysisMode);
-  const [questionMode, setQuestionMode] = useState(() =>
-    getQueryOption(
+  const [questionMode, setQuestionMode] = useState(() => {
+    const initialQuestion = getQueryOption(
       "question",
       QUESTION_OPTIONS.map((option) => option.value),
       "latest"
-    )
-  );
+    );
+
+    return analysisMode === "compare" &&
+      ["vendor_payments", "capital_projects", "education_outcomes"].includes(
+        initialQuestion
+      )
+      ? "latest"
+      : initialQuestion;
+  });
   const [coverageSourceId, setCoverageSourceId] = useState(
     getQueryCoverageSourceId
   );
@@ -2317,6 +2665,10 @@ export default function App() {
       return;
     }
 
+    if (value === "compare") {
+      setCoverageSourceId("operating-budget");
+    }
+
     if (
       questionMode === "vendor_payments" ||
       questionMode === "capital_projects" ||
@@ -2414,7 +2766,10 @@ export default function App() {
   }, [activeStateCode, hasInitialFilterParams, selectedYear]);
 
   useEffect(() => {
-    if (!activeStateCode || questionMode !== "vendor_payments") return undefined;
+    const needsVendorPayments =
+      questionMode === "vendor_payments" || analysisMode === "compare";
+
+    if (!activeStateCode || !needsVendorPayments) return undefined;
 
     const controller = new AbortController();
 
@@ -2449,12 +2804,21 @@ export default function App() {
     loadVendorYears();
 
     return () => controller.abort();
-  }, [activeStateCode, initialVendorYearRequest, questionMode, selectedYear]);
+  }, [
+    activeStateCode,
+    analysisMode,
+    initialVendorYearRequest,
+    questionMode,
+    selectedYear,
+  ]);
 
   useEffect(() => {
+    const needsVendorPayments =
+      questionMode === "vendor_payments" || analysisMode === "compare";
+
     if (
       !activeStateCode ||
-      questionMode !== "vendor_payments" ||
+      !needsVendorPayments ||
       !selectedVendorYear
     ) {
       return undefined;
@@ -2473,9 +2837,10 @@ export default function App() {
         const detail = await fetchVendorPaymentDetail(
           {
             fiscalYear: Number(selectedVendorYear),
-            searchQuery: vendorSearchQuery,
-            agencyFilter: vendorAgencyFilter,
-            categoryFilter: vendorCategoryFilter,
+            searchQuery: analysisMode === "compare" ? "" : vendorSearchQuery,
+            agencyFilter: analysisMode === "compare" ? "all" : vendorAgencyFilter,
+            categoryFilter:
+              analysisMode === "compare" ? "all" : vendorCategoryFilter,
           },
           controller.signal
         );
@@ -2501,6 +2866,7 @@ export default function App() {
     return () => controller.abort();
   }, [
     activeStateCode,
+    analysisMode,
     questionMode,
     selectedVendorYear,
     vendorAgencyFilter,
@@ -2509,7 +2875,10 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!activeStateCode || questionMode !== "capital_projects") return undefined;
+    const needsCapitalProjects =
+      questionMode === "capital_projects" || analysisMode === "compare";
+
+    if (!activeStateCode || !needsCapitalProjects) return undefined;
 
     const controller = new AbortController();
 
@@ -2544,12 +2913,21 @@ export default function App() {
     loadCapitalYears();
 
     return () => controller.abort();
-  }, [activeStateCode, initialCapitalYearRequest, questionMode, selectedYear]);
+  }, [
+    activeStateCode,
+    analysisMode,
+    initialCapitalYearRequest,
+    questionMode,
+    selectedYear,
+  ]);
 
   useEffect(() => {
+    const needsCapitalProjects =
+      questionMode === "capital_projects" || analysisMode === "compare";
+
     if (
       !activeStateCode ||
-      questionMode !== "capital_projects" ||
+      !needsCapitalProjects ||
       !selectedCapitalYear
     ) {
       return undefined;
@@ -2568,12 +2946,17 @@ export default function App() {
         const detail = await fetchCapitalProjectDetail(
           {
             fiscalYear: Number(selectedCapitalYear),
-            searchQuery: capitalSearchQuery,
-            agencyFilter: capitalAgencyFilter,
-            countyFilter: capitalCountyFilter,
-            categoryFilter: capitalCategoryFilter,
-            fundTypeFilter: capitalFundTypeFilter,
-            projectTypeFilter: capitalProjectTypeFilter,
+            searchQuery: analysisMode === "compare" ? "" : capitalSearchQuery,
+            agencyFilter:
+              analysisMode === "compare" ? "all" : capitalAgencyFilter,
+            countyFilter:
+              analysisMode === "compare" ? "all" : capitalCountyFilter,
+            categoryFilter:
+              analysisMode === "compare" ? "all" : capitalCategoryFilter,
+            fundTypeFilter:
+              analysisMode === "compare" ? "all" : capitalFundTypeFilter,
+            projectTypeFilter:
+              analysisMode === "compare" ? "all" : capitalProjectTypeFilter,
           },
           controller.signal
         );
@@ -2599,6 +2982,7 @@ export default function App() {
     return () => controller.abort();
   }, [
     activeStateCode,
+    analysisMode,
     capitalAgencyFilter,
     capitalCategoryFilter,
     capitalCountyFilter,
@@ -2619,41 +3003,48 @@ export default function App() {
     params.set("question", questionMode);
     if (
       analysisMode === "coverage" ||
+      analysisMode === "compare" ||
       questionMode === "vendor_payments" ||
       questionMode === "capital_projects"
     ) {
       params.set("source", coverageSourceId);
     }
-    if (questionMode === "vendor_payments") {
+    if (questionMode === "vendor_payments" || analysisMode === "compare") {
       if (selectedVendorYear) params.set("paymentYear", selectedVendorYear);
-      if (vendorSearchQuery.trim()) {
+      if (questionMode === "vendor_payments" && vendorSearchQuery.trim()) {
         params.set("vendorSearch", vendorSearchQuery.trim());
       }
-      if (vendorAgencyFilter !== "all") {
+      if (questionMode === "vendor_payments" && vendorAgencyFilter !== "all") {
         params.set("vendorAgency", vendorAgencyFilter);
       }
-      if (vendorCategoryFilter !== "all") {
+      if (questionMode === "vendor_payments" && vendorCategoryFilter !== "all") {
         params.set("vendorCategory", vendorCategoryFilter);
       }
     }
-    if (questionMode === "capital_projects") {
+    if (questionMode === "capital_projects" || analysisMode === "compare") {
       if (selectedCapitalYear) params.set("capitalYear", selectedCapitalYear);
-      if (capitalSearchQuery.trim()) {
+      if (questionMode === "capital_projects" && capitalSearchQuery.trim()) {
         params.set("capitalSearch", capitalSearchQuery.trim());
       }
-      if (capitalAgencyFilter !== "all") {
+      if (questionMode === "capital_projects" && capitalAgencyFilter !== "all") {
         params.set("capitalAgency", capitalAgencyFilter);
       }
-      if (capitalCountyFilter !== "all") {
+      if (questionMode === "capital_projects" && capitalCountyFilter !== "all") {
         params.set("capitalCounty", capitalCountyFilter);
       }
-      if (capitalCategoryFilter !== "all") {
+      if (questionMode === "capital_projects" && capitalCategoryFilter !== "all") {
         params.set("capitalCategory", capitalCategoryFilter);
       }
-      if (capitalFundTypeFilter !== "all") {
+      if (
+        questionMode === "capital_projects" &&
+        capitalFundTypeFilter !== "all"
+      ) {
         params.set("capitalFund", capitalFundTypeFilter);
       }
-      if (capitalProjectTypeFilter !== "all") {
+      if (
+        questionMode === "capital_projects" &&
+        capitalProjectTypeFilter !== "all"
+      ) {
         params.set("capitalType", capitalProjectTypeFilter);
       }
     }
@@ -2799,8 +3190,24 @@ export default function App() {
   );
   const selectedYearLabel = selectedYear ? `FY ${selectedYear}` : "Loading";
   const metadata = budgetDetail?.metadata || sourceMetadata || DEFAULT_SOURCE_METADATA;
+  const comparisonMetadata = {
+    ...metadata,
+    coverage:
+      "This comparison uses connected Maryland operating-budget allocations, vendor-payment summaries, and FY 2027 enacted capital-budget project/program authorizations while keeping source definitions separate.",
+    confidenceReason:
+      "Official Maryland sources are connected for the operating-budget, vendor-payment, and capital-budget comparison streams.",
+    knownExclusions: [
+      "Audited payment-to-program reconciliation keys",
+      "Procurement contract identifiers matched to every payment",
+      "Capital project-to-vendor payment matching",
+      "Local school district and local government ledgers",
+      "Capital-project years beyond the connected FY 2027 enacted document",
+    ],
+  };
   const displayMetadata =
-    questionMode === "vendor_payments"
+    analysisMode === "compare"
+      ? comparisonMetadata
+      : questionMode === "vendor_payments"
       ? vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA
       : questionMode === "capital_projects"
         ? capitalProjectDetail?.metadata || DEFAULT_CAPITAL_PROJECT_METADATA
@@ -3049,19 +3456,25 @@ export default function App() {
 
   const activeStateName = activeState?.name || "Selected state";
   const heroModeLabel =
-    questionMode === "vendor_payments"
+    analysisMode === "compare"
+      ? "budget comparison"
+      : questionMode === "vendor_payments"
       ? "vendor payments"
       : questionMode === "capital_projects"
         ? "capital budget"
         : "operating budget";
   const heroTitle =
-    questionMode === "vendor_payments"
+    analysisMode === "compare"
+      ? `${activeStateName} Budget Comparison`
+      : questionMode === "vendor_payments"
       ? `${activeStateName} Vendor Payments`
       : questionMode === "capital_projects"
         ? `${activeStateName} Capital Projects`
         : `${activeStateName} Operating Budget`;
   const heroDescription =
-    questionMode === "vendor_payments"
+    analysisMode === "compare"
+      ? "Compare operating-budget allocations, official vendor-payment records, and enacted capital-budget authorizations while keeping each source's definition visible."
+      : questionMode === "vendor_payments"
       ? "Explore official vendor-payment records beside operating-budget context without mixing transaction data into budget allocations."
       : questionMode === "capital_projects"
         ? "Explore enacted capital-budget projects and programs beside operating-budget context without mixing long-term authorizations into recurring allocations."
@@ -3353,6 +3766,7 @@ export default function App() {
       <QuestionNotice
         questionMode={questionMode}
         selectedYearLabel={selectedYearLabel}
+        analysisMode={analysisMode}
       />
 
       {(loadingYears || loadingDetail || loadingVendorYears || loadingCapitalYears) && (
@@ -3377,7 +3791,9 @@ export default function App() {
           <DataCoveragePanels
             metadata={displayMetadata}
             budgetStage={
-              questionMode === "vendor_payments"
+              analysisMode === "compare"
+                ? "Cross-source comparison"
+                : questionMode === "vendor_payments"
                 ? "Vendor payments"
                 : questionMode === "capital_projects"
                   ? "Capital projects"
@@ -3494,6 +3910,20 @@ export default function App() {
               budgetYears={budgetYears}
               filteredRows={filteredRows}
               selectedYear={selectedYear}
+              vendorPaymentYears={vendorPaymentYears}
+              selectedVendorYear={selectedVendorYear}
+              onSelectedVendorYearChange={setSelectedVendorYear}
+              vendorPaymentDetail={vendorPaymentDetail}
+              loadingVendorYears={loadingVendorYears}
+              loadingVendorPayments={loadingVendorPayments}
+              vendorErrorMessage={vendorErrorMessage}
+              capitalProjectYears={capitalProjectYears}
+              selectedCapitalYear={selectedCapitalYear}
+              onSelectedCapitalYearChange={setSelectedCapitalYear}
+              capitalProjectDetail={capitalProjectDetail}
+              loadingCapitalYears={loadingCapitalYears}
+              loadingCapitalProjects={loadingCapitalProjects}
+              capitalErrorMessage={capitalErrorMessage}
             />
           )}
 
