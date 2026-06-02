@@ -23,6 +23,64 @@ const BAR_COLORS = [
   "#4f46e5",
 ];
 
+const STATE_OPTIONS = [
+  { code: "AL", name: "Alabama" },
+  { code: "AK", name: "Alaska" },
+  { code: "AZ", name: "Arizona" },
+  { code: "AR", name: "Arkansas" },
+  { code: "CA", name: "California" },
+  { code: "CO", name: "Colorado" },
+  { code: "CT", name: "Connecticut" },
+  { code: "DE", name: "Delaware" },
+  { code: "DC", name: "District of Columbia" },
+  { code: "FL", name: "Florida" },
+  { code: "GA", name: "Georgia" },
+  { code: "HI", name: "Hawaii" },
+  { code: "ID", name: "Idaho" },
+  { code: "IL", name: "Illinois" },
+  { code: "IN", name: "Indiana" },
+  { code: "IA", name: "Iowa" },
+  { code: "KS", name: "Kansas" },
+  { code: "KY", name: "Kentucky" },
+  { code: "LA", name: "Louisiana" },
+  { code: "ME", name: "Maine" },
+  { code: "MD", name: "Maryland", isConnected: true },
+  { code: "MA", name: "Massachusetts" },
+  { code: "MI", name: "Michigan" },
+  { code: "MN", name: "Minnesota" },
+  { code: "MS", name: "Mississippi" },
+  { code: "MO", name: "Missouri" },
+  { code: "MT", name: "Montana" },
+  { code: "NE", name: "Nebraska" },
+  { code: "NV", name: "Nevada" },
+  { code: "NH", name: "New Hampshire" },
+  { code: "NJ", name: "New Jersey" },
+  { code: "NM", name: "New Mexico" },
+  { code: "NY", name: "New York" },
+  { code: "NC", name: "North Carolina" },
+  { code: "ND", name: "North Dakota" },
+  { code: "OH", name: "Ohio" },
+  { code: "OK", name: "Oklahoma" },
+  { code: "OR", name: "Oregon" },
+  { code: "PA", name: "Pennsylvania" },
+  { code: "RI", name: "Rhode Island" },
+  { code: "SC", name: "South Carolina" },
+  { code: "SD", name: "South Dakota" },
+  { code: "TN", name: "Tennessee" },
+  { code: "TX", name: "Texas" },
+  { code: "UT", name: "Utah" },
+  { code: "VT", name: "Vermont" },
+  { code: "VA", name: "Virginia" },
+  { code: "WA", name: "Washington" },
+  { code: "WV", name: "West Virginia" },
+  { code: "WI", name: "Wisconsin" },
+  { code: "WY", name: "Wyoming" },
+];
+
+const STATE_BY_CODE = Object.fromEntries(
+  STATE_OPTIONS.map((state) => [state.code, state])
+);
+
 function formatMoney(value) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -156,10 +214,12 @@ function BudgetBars({ rows }) {
 }
 
 export default function App() {
+  const [selectedStateCode, setSelectedStateCode] = useState("");
+  const [activeStateCode, setActiveStateCode] = useState("");
   const [budgetYears, setBudgetYears] = useState([]);
   const [selectedYear, setSelectedYear] = useState("");
   const [budgetDetail, setBudgetDetail] = useState(null);
-  const [loadingYears, setLoadingYears] = useState(true);
+  const [loadingYears, setLoadingYears] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -167,6 +227,9 @@ export default function App() {
   const [fundFilter, setFundFilter] = useState("all");
   const [sortMode, setSortMode] = useState("amount");
   const [rowLimit, setRowLimit] = useState("100");
+  const selectedState = STATE_BY_CODE[selectedStateCode];
+  const activeState = STATE_BY_CODE[activeStateCode];
+  const canOpenSelectedState = Boolean(selectedState?.isConnected);
 
   function resetFilters() {
     setSearchQuery("");
@@ -176,7 +239,30 @@ export default function App() {
     setRowLimit("100");
   }
 
+  function clearBudgetData() {
+    setBudgetYears([]);
+    setSelectedYear("");
+    setBudgetDetail(null);
+    setErrorMessage("");
+    setLoadingYears(false);
+    setLoadingDetail(false);
+    resetFilters();
+  }
+
+  function openSelectedState() {
+    if (!canOpenSelectedState) return;
+    clearBudgetData();
+    setActiveStateCode(selectedStateCode);
+  }
+
+  function changeState() {
+    setActiveStateCode("");
+    clearBudgetData();
+  }
+
   useEffect(() => {
+    if (!activeStateCode) return undefined;
+
     const controller = new AbortController();
 
     async function loadYears() {
@@ -204,10 +290,10 @@ export default function App() {
     loadYears();
 
     return () => controller.abort();
-  }, []);
+  }, [activeStateCode]);
 
   useEffect(() => {
-    if (!selectedYear) return undefined;
+    if (!activeStateCode || !selectedYear) return undefined;
 
     const controller = new AbortController();
 
@@ -242,7 +328,7 @@ export default function App() {
     loadBudgetDetail();
 
     return () => controller.abort();
-  }, [selectedYear]);
+  }, [activeStateCode, selectedYear]);
 
   const agencyOptions = useMemo(() => {
     if (!budgetDetail) return [];
@@ -311,25 +397,87 @@ export default function App() {
     sortMode !== "amount" ||
     rowLimit !== "100";
 
+  if (!activeState) {
+    return (
+      <main className="page page-centered">
+        <section className="welcome-screen">
+          <div className="welcome-copy">
+            <p className="eyebrow">State operating budget</p>
+            <h1>Choose a state budget to explore</h1>
+            <p>
+              Start with a state, then review operating-budget totals by fiscal
+              year, agency, program, unit, and fund type.
+            </p>
+          </div>
+
+          <div className="welcome-panel">
+            <div className="control-field">
+              <label htmlFor="state-select">State</label>
+              <select
+                id="state-select"
+                value={selectedStateCode}
+                onChange={(event) => setSelectedStateCode(event.target.value)}
+              >
+                <option value="">Choose a state</option>
+                {STATE_OPTIONS.map((state) => (
+                  <option key={state.code} value={state.code}>
+                    {state.name}
+                    {state.isConnected ? "" : " (coming soon)"}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              type="button"
+              onClick={openSelectedState}
+              disabled={!canOpenSelectedState}
+            >
+              View operating budget
+            </button>
+
+            {selectedStateCode && !canOpenSelectedState && (
+              <p className="state-message">
+                {selectedState?.name} is not connected yet. Maryland operating
+                budget data is available now.
+              </p>
+            )}
+
+            <div className="connected-state">
+              <span>Connected now</span>
+              <strong>Maryland</strong>
+              <small>{SOURCE_LABEL}</small>
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="page">
       <header className="hero">
         <div className="hero-copy">
-          <p className="eyebrow">Maryland open budget</p>
-          <h1>Maryland Operating Budget</h1>
+          <p className="eyebrow">{activeState.name} state operating budget</p>
+          <h1>{activeState.name} Operating Budget</h1>
           <p>
-            Agency, program, and fund allocations from Maryland's current
+            Agency, program, and fund allocations from {activeState.name}'s current
             operating budget open-data release.
           </p>
         </div>
 
         <aside className="source-panel" aria-label="Official data source">
+          <span>Selected state</span>
+          <strong>{activeState.name}</strong>
           <span>Official source</span>
           <a href={SOURCE_URL} target="_blank" rel="noreferrer">
             {SOURCE_LABEL}
           </a>
           <small>Data last modified {SOURCE_LAST_MODIFIED}</small>
           <small>Metadata updated {SOURCE_METADATA_UPDATED}</small>
+          <button type="button" className="secondary-button" onClick={changeState}>
+            Change state
+          </button>
         </aside>
       </header>
 

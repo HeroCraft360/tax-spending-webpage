@@ -1,7 +1,8 @@
-# Maryland Operating Budget Explorer
+# State Operating Budget Explorer
 
-React/Vite dashboard for exploring Maryland operating budget allocations by
-fiscal year, agency, program, unit, and fund type.
+React/Vite dashboard for selecting a state and exploring operating budget
+allocations by fiscal year, agency, program, unit, and fund type. Maryland is
+the currently connected state data source.
 
 ## Data Source
 
