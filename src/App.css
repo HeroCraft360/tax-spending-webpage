@@ -1024,6 +1024,13 @@ button:focus {
   align-items: end;
 }
 
+.capital-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
 .vendor-loading-panel {
   margin: 16px 0 0;
 }
@@ -1032,8 +1039,14 @@ button:focus {
   margin-bottom: 20px;
 }
 
+.capital-dashboard-grid {
+  margin-bottom: 20px;
+}
+
 .vendor-nested-panel h3,
-.vendor-table-panel h3 {
+.vendor-table-panel h3,
+.capital-nested-panel h3,
+.capital-table-panel h3 {
   margin: 0;
   color: #111827;
   font-size: 20px;

@@ -16,6 +16,13 @@ import {
   VENDOR_PAYMENTS_METADATA_UPDATED,
 } from "./data/marylandVendorPayments";
 import {
+  CAPITAL_PROJECTS_LAST_UPDATED,
+  CAPITAL_PROJECTS_METADATA_UPDATED,
+  DEFAULT_CAPITAL_PROJECT_METADATA,
+  fetchCapitalProjectDetail,
+  fetchCapitalProjectYears,
+} from "./data/marylandCapitalProjects";
+import {
   BUDGET_COVERAGE_SOURCES,
   CAPITAL_PROJECT_PIPELINE,
   COVERAGE_IMPLEMENTATION_STEPS,
@@ -54,6 +61,10 @@ const ANALYSIS_MODES = [
     label: "Vendor Payments",
   },
   {
+    value: "capital",
+    label: "Capital Projects",
+  },
+  {
     value: "accountability",
     label: "Outcome Check",
   },
@@ -87,6 +98,12 @@ const QUESTION_OPTIONS = [
     value: "vendor_payments",
     label: "Vendor payments",
     description: "Shows the official vendor-payment source status and exclusions.",
+  },
+  {
+    value: "capital_projects",
+    label: "Capital projects",
+    description:
+      "Shows official capital-budget projects and programs from the enacted capital document.",
   },
   {
     value: "education_outcomes",
@@ -197,6 +214,7 @@ function getInitialAnalysisMode() {
   const requestedQuestion = getQueryValue("question");
 
   if (requestedQuestion === "vendor_payments") return "payments";
+  if (requestedQuestion === "capital_projects") return "capital";
   if (requestedQuestion === "education_outcomes") return "accountability";
 
   return "overview";
@@ -262,6 +280,10 @@ function matchesQuestion(row, questionMode) {
     return false;
   }
 
+  if (questionMode === "capital_projects") {
+    return false;
+  }
+
   return true;
 }
 
@@ -276,6 +298,10 @@ function getQuestionNotice(questionMode, selectedYearLabel) {
 
   if (questionMode === "vendor_payments") {
     return "Vendor payments use the official Maryland payments dataset. These are payment records, not operating-budget allocations, and current-year values may be partial.";
+  }
+
+  if (questionMode === "capital_projects") {
+    return "Capital projects use the official Maryland FY 2027 enacted capital-budget document. These are project and program authorizations, not operating allocations or vendor payments.";
   }
 
   if (questionMode === "education_outcomes") {
@@ -454,8 +480,30 @@ function buildVendorTraceRow(payment, vendorPaymentDetail) {
   };
 }
 
+function buildCapitalTraceRow(project, capitalProjectDetail) {
+  return {
+    fiscalYear: project.fiscalYear,
+    agencyName: project.agencyName,
+    unitName: project.county,
+    programName: project.projectTitle,
+    subprogramName: project.projectType,
+    categoryTitle: project.category,
+    fundType: project.fundType,
+    budgetStage: project.budgetStage,
+    sourceLabel: project.sourceLabel,
+    sourceUrl: project.sourceUrl,
+    confidence: project.confidence,
+    notes: `${project.notes.replace(/\.$/, "")}; source PDF page ${project.sourcePage}`,
+    dollarAmount: project.dollarAmount,
+    percentage: project.percentage,
+    traceType: "Capital project",
+    traceTotalAmount: capitalProjectDetail?.totalAmount || 0,
+    traceTotalLabel: `FY ${project.fiscalYear} enacted capital-budget total`,
+  };
+}
+
 function getActiveFilterSummary(filters) {
-  return [
+  const summary = [
     { label: "Search", value: filters.searchQuery || "None" },
     { label: "Agency", value: filters.agencyFilter === "all" ? "All" : filters.agencyFilter },
     { label: "Fund", value: filters.fundFilter === "all" ? "All" : filters.fundFilter },
@@ -471,6 +519,27 @@ function getActiveFilterSummary(filters) {
       value: filters.categoryFilter === "all" ? "All" : filters.categoryFilter,
     },
   ];
+
+  if (filters.capitalCountyFilter !== undefined) {
+    summary.push(
+      {
+        label: "Capital county",
+        value:
+          filters.capitalCountyFilter === "all"
+            ? "All"
+            : filters.capitalCountyFilter,
+      },
+      {
+        label: "Capital type",
+        value:
+          filters.capitalProjectTypeFilter === "all"
+            ? "All"
+            : filters.capitalProjectTypeFilter,
+      }
+    );
+  }
+
+  return summary;
 }
 
 function MetricCard({ label, value, detail }) {
@@ -1516,6 +1585,398 @@ function VendorPaymentsPanel({
   );
 }
 
+function CapitalProjectBars({ rows }) {
+  const maxAmount = rows[0]?.dollarAmount || 0;
+
+  if (!rows.length) {
+    return <p className="empty-state">No capital projects match the current filters.</p>;
+  }
+
+  return (
+    <div className="bar-list">
+      {rows.map((row, index) => {
+        const width = maxAmount > 0 ? (row.dollarAmount / maxAmount) * 100 : 0;
+
+        return (
+          <div className="bar-row" key={row.id}>
+            <div className="bar-row-top">
+              <span>{row.projectTitle}</span>
+              <strong>{formatMoney(row.dollarAmount)}</strong>
+            </div>
+            <div className="bar-track" aria-hidden="true">
+              <div
+                className="bar-fill"
+                style={{
+                  "--bar-width": `${width}%`,
+                  "--bar-color": BAR_COLORS[index % BAR_COLORS.length],
+                }}
+              />
+            </div>
+            <div className="bar-row-meta">
+              <span>{row.agencyName}</span>
+              <span>
+                {row.county} / {row.fundType} / {row.projectType} /{" "}
+                {formatPercent(row.percentage)}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CapitalProjectsPanel({
+  capitalProjectYears,
+  selectedCapitalYear,
+  onSelectedCapitalYearChange,
+  capitalSearchQuery,
+  onCapitalSearchQueryChange,
+  capitalAgencyFilter,
+  onCapitalAgencyFilterChange,
+  capitalCountyFilter,
+  onCapitalCountyFilterChange,
+  capitalCategoryFilter,
+  onCapitalCategoryFilterChange,
+  capitalFundTypeFilter,
+  onCapitalFundTypeFilterChange,
+  capitalProjectTypeFilter,
+  onCapitalProjectTypeFilterChange,
+  capitalProjectDetail,
+  loading,
+  errorMessage,
+  onTraceProject,
+  onExportProjects,
+  onCopyCitation,
+  onCopyViewLink,
+}) {
+  const metadata = capitalProjectDetail?.metadata || DEFAULT_CAPITAL_PROJECT_METADATA;
+  const projects = capitalProjectDetail?.projects || [];
+  const topProjectRows = projects.slice(0, 10);
+  const topProject = projects[0];
+  const agencyOptions = capitalProjectDetail?.topAgencies || [];
+  const countyOptions = capitalProjectDetail?.topCounties || [];
+  const categoryOptions = capitalProjectDetail?.categories || [];
+  const fundTypeOptions = capitalProjectDetail?.fundTypes || [];
+  const projectTypeOptions = capitalProjectDetail?.projectTypes || [];
+
+  return (
+    <section className="capital-project-section">
+      <section className="panel capital-overview-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Capital Project Explorer</h2>
+            <p>
+              Search official Maryland capital-budget project and program
+              authorizations by agency, county, category, fund type, and fiscal
+              year.
+            </p>
+          </div>
+          <CoverageStatusBadge status="Live" />
+        </div>
+
+        <div className="vendor-source-strip capital-source-strip">
+          <div>
+            <span>Official source</span>
+            <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">
+              {metadata.sourceLabel}
+            </a>
+          </div>
+          <div>
+            <span>Budget stage</span>
+            <strong>Enacted</strong>
+          </div>
+          <div>
+            <span>Frequency</span>
+            <strong>{metadata.updateFrequency}</strong>
+          </div>
+          <div>
+            <span>DBM page</span>
+            <a href={metadata.sourcePageUrl} target="_blank" rel="noreferrer">
+              Capital budget
+            </a>
+          </div>
+        </div>
+
+        <div className="capital-controls" aria-label="Capital project controls">
+          <div className="control-field">
+            <label htmlFor="capital-year-select">Capital fiscal year</label>
+            <select
+              id="capital-year-select"
+              value={selectedCapitalYear}
+              onChange={(event) => onSelectedCapitalYearChange(event.target.value)}
+              disabled={loading || !capitalProjectYears.length}
+            >
+              {capitalProjectYears.map((year) => (
+                <option key={year.fiscalYear} value={year.fiscalYear}>
+                  FY {year.fiscalYear} / {year.budgetStage}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field control-field-wide">
+            <label htmlFor="capital-search-input">Capital search</label>
+            <input
+              id="capital-search-input"
+              type="search"
+              placeholder="Project, agency, county, category, or fund"
+              value={capitalSearchQuery}
+              onChange={(event) => onCapitalSearchQueryChange(event.target.value)}
+              disabled={loading || !selectedCapitalYear}
+            />
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="capital-agency-filter">Capital agency</label>
+            <select
+              id="capital-agency-filter"
+              value={capitalAgencyFilter}
+              onChange={(event) => onCapitalAgencyFilterChange(event.target.value)}
+              disabled={loading || !capitalProjectDetail}
+            >
+              <option value="all">All agencies</option>
+              {agencyOptions.map((agency) => (
+                <option key={agency.name} value={agency.name}>
+                  {agency.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="capital-county-filter">County</label>
+            <select
+              id="capital-county-filter"
+              value={capitalCountyFilter}
+              onChange={(event) => onCapitalCountyFilterChange(event.target.value)}
+              disabled={loading || !capitalProjectDetail}
+            >
+              <option value="all">All counties</option>
+              {countyOptions.map((county) => (
+                <option key={county.name} value={county.name}>
+                  {county.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="capital-category-filter">Capital category</label>
+            <select
+              id="capital-category-filter"
+              value={capitalCategoryFilter}
+              onChange={(event) => onCapitalCategoryFilterChange(event.target.value)}
+              disabled={loading || !capitalProjectDetail}
+            >
+              <option value="all">All categories</option>
+              {categoryOptions.map((category) => (
+                <option key={category.name} value={category.name}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="capital-fund-filter">Capital fund type</label>
+            <select
+              id="capital-fund-filter"
+              value={capitalFundTypeFilter}
+              onChange={(event) => onCapitalFundTypeFilterChange(event.target.value)}
+              disabled={loading || !capitalProjectDetail}
+            >
+              <option value="all">All fund types</option>
+              {fundTypeOptions.map((fund) => (
+                <option key={fund.name} value={fund.name}>
+                  {fund.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="capital-type-filter">Record type</label>
+            <select
+              id="capital-type-filter"
+              value={capitalProjectTypeFilter}
+              onChange={(event) => onCapitalProjectTypeFilterChange(event.target.value)}
+              disabled={loading || !capitalProjectDetail}
+            >
+              <option value="all">All record types</option>
+              {projectTypeOptions.map((type) => (
+                <option key={type.name} value={type.name}>
+                  {type.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {loading && (
+          <section className="loading-panel vendor-loading-panel" aria-live="polite">
+            <div className="spinner" />
+            <p>Loading FY {selectedCapitalYear || ""} capital projects...</p>
+          </section>
+        )}
+
+        {errorMessage && <p className="error-message">{errorMessage}</p>}
+      </section>
+
+      {capitalProjectDetail && !loading && (
+        <>
+          <div className="comparison-grid">
+            <MetricCard
+              label={`FY ${capitalProjectDetail.fiscalYear} enacted capital total`}
+              value={formatMoney(capitalProjectDetail.totalAmount)}
+              detail={formatFullMoney(capitalProjectDetail.totalAmount)}
+            />
+            <MetricCard
+              label="Filtered capital rows"
+              value={formatNumber(capitalProjectDetail.rowCount)}
+              detail={`${formatMoney(
+                capitalProjectDetail.filteredTotal
+              )} across matching records`}
+            />
+            <MetricCard
+              label="Pre-deauthorization total"
+              value={formatMoney(capitalProjectDetail.authorizedBeforeDeauthorizations)}
+              detail={`${formatMoney(
+                capitalProjectDetail.deauthorizations
+              )} in deauthorizations/reversions`}
+            />
+            <MetricCard
+              label="Largest row in view"
+              value={topProject ? formatMoney(topProject.dollarAmount) : "$0"}
+              detail={topProject?.projectTitle || "No capital rows returned"}
+            />
+          </div>
+
+          <section className="dashboard-grid capital-dashboard-grid">
+            <section className="panel panel-large capital-nested-panel">
+              <div className="panel-heading">
+                <div>
+                  <h3>Largest Capital Authorizations</h3>
+                  <p>
+                    Project and program rows from the enacted capital-budget
+                    document after active filters.
+                  </p>
+                </div>
+                <span>{formatNumber(projects.length)} rows</span>
+              </div>
+
+              <CapitalProjectBars rows={topProjectRows} />
+            </section>
+
+            <div className="side-stack">
+              <MiniBreakdown
+                title="Capital Fund Summary"
+                rows={capitalProjectDetail.fundSummary}
+              />
+              <MiniBreakdown
+                title="Counties In View"
+                rows={capitalProjectDetail.topCounties.slice(0, 12)}
+              />
+            </div>
+          </section>
+
+          <section className="table-panel capital-table-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>Capital Project Detail</h3>
+                <p>
+                  Showing {formatNumber(projects.length)} normalized rows from
+                  FY {capitalProjectDetail.fiscalYear} enacted capital-budget
+                  detail.
+                </p>
+              </div>
+              <span>{formatMoney(capitalProjectDetail.filteredTotal)}</span>
+            </div>
+
+            <div className="table-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onExportProjects}
+                disabled={!projects.length}
+              >
+                Export capital CSV
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyCitation}
+              >
+                Copy capital source
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyViewLink}
+              >
+                Copy view link
+              </button>
+            </div>
+
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fiscal Year</th>
+                    <th>Agency</th>
+                    <th>County</th>
+                    <th>Project / Program</th>
+                    <th>Category</th>
+                    <th>Type</th>
+                    <th>Fund Type</th>
+                    <th>Amount</th>
+                    <th>Share</th>
+                    <th>PDF Page</th>
+                    <th>Confidence</th>
+                    <th>Trace</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {projects.map((project) => (
+                    <tr key={project.id}>
+                      <td>FY {project.fiscalYear}</td>
+                      <td>{project.agencyName}</td>
+                      <td>{project.county}</td>
+                      <td>{project.projectTitle}</td>
+                      <td>{project.category}</td>
+                      <td>{project.projectType}</td>
+                      <td>{project.fundType}</td>
+                      <td>{formatFullMoney(project.dollarAmount)}</td>
+                      <td>{formatPercent(project.percentage)}</td>
+                      <td>{project.sourcePage}</td>
+                      <td>
+                        <ConfidenceBadge confidence={project.confidence} />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="trace-button"
+                          onClick={() => onTraceProject(project)}
+                        >
+                          Trace
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <footer className="panel-footnote">
+            {metadata.limitations.join(" ")}
+          </footer>
+        </>
+      )}
+    </section>
+  );
+}
+
 function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
   if (!row) return null;
 
@@ -1523,7 +1984,13 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
   const share = totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0;
   const activeFilters = getActiveFilterSummary(filters);
   const isVendorTrace = row.traceType === "Vendor payment";
+  const isCapitalTrace = row.traceType === "Capital project";
   const totalLabel = row.traceTotalLabel || "selected-year operating budget total";
+  const traceLabel = isVendorTrace
+    ? "Vendor payment trace"
+    : isCapitalTrace
+      ? "Capital project trace"
+      : "Allocation trace";
 
   return (
     <div className="trace-drawer-backdrop" role="presentation">
@@ -1535,7 +2002,7 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
       >
         <div className="trace-drawer-heading">
           <div>
-            <span>{isVendorTrace ? "Vendor payment trace" : "Allocation trace"}</span>
+            <span>{traceLabel}</span>
             <h2>{row.programName}</h2>
           </div>
           <button type="button" className="trace-close-button" onClick={onClose}>
@@ -1566,11 +2033,23 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
             <strong>{row.agencyName}</strong>
           </div>
           <div>
-            <span>{isVendorTrace ? "Payment category/code" : "Department"}</span>
+            <span>
+              {isVendorTrace
+                ? "Payment category/code"
+                : isCapitalTrace
+                  ? "County"
+                  : "Department"}
+            </span>
             <strong>{row.unitName}</strong>
           </div>
           <div>
-            <span>{isVendorTrace ? "Category/code" : "Category"}</span>
+            <span>
+              {isVendorTrace
+                ? "Category/code"
+                : isCapitalTrace
+                  ? "Capital category"
+                  : "Category"}
+            </span>
             <strong>{row.categoryTitle}</strong>
           </div>
           <div>
@@ -1612,6 +2091,7 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
 export default function App() {
   const [initialYearRequest] = useState(() => getQueryValue("year"));
   const [initialVendorYearRequest] = useState(() => getQueryValue("paymentYear"));
+  const [initialCapitalYearRequest] = useState(() => getQueryValue("capitalYear"));
   const [hasInitialFilterParams] = useState(
     () =>
       Boolean(getQueryValue("search")) ||
@@ -1634,6 +2114,9 @@ export default function App() {
   const [vendorPaymentYears, setVendorPaymentYears] = useState([]);
   const [selectedVendorYear, setSelectedVendorYear] = useState("");
   const [vendorPaymentDetail, setVendorPaymentDetail] = useState(null);
+  const [capitalProjectYears, setCapitalProjectYears] = useState([]);
+  const [selectedCapitalYear, setSelectedCapitalYear] = useState("");
+  const [capitalProjectDetail, setCapitalProjectDetail] = useState(null);
   const [analysisMode, setAnalysisMode] = useState(getInitialAnalysisMode);
   const [questionMode, setQuestionMode] = useState(() =>
     getQueryOption(
@@ -1649,8 +2132,11 @@ export default function App() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [loadingVendorYears, setLoadingVendorYears] = useState(false);
   const [loadingVendorPayments, setLoadingVendorPayments] = useState(false);
+  const [loadingCapitalYears, setLoadingCapitalYears] = useState(false);
+  const [loadingCapitalProjects, setLoadingCapitalProjects] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [vendorErrorMessage, setVendorErrorMessage] = useState("");
+  const [capitalErrorMessage, setCapitalErrorMessage] = useState("");
   const [traceMessage, setTraceMessage] = useState("");
   const [traceRow, setTraceRow] = useState(null);
   const [searchQuery, setSearchQuery] = useState(() => getQueryValue("search"));
@@ -1681,6 +2167,24 @@ export default function App() {
   const [vendorCategoryFilter, setVendorCategoryFilter] = useState(
     () => getQueryValue("vendorCategory") || "all"
   );
+  const [capitalSearchQuery, setCapitalSearchQuery] = useState(() =>
+    getQueryValue("capitalSearch")
+  );
+  const [capitalAgencyFilter, setCapitalAgencyFilter] = useState(
+    () => getQueryValue("capitalAgency") || "all"
+  );
+  const [capitalCountyFilter, setCapitalCountyFilter] = useState(
+    () => getQueryValue("capitalCounty") || "all"
+  );
+  const [capitalCategoryFilter, setCapitalCategoryFilter] = useState(
+    () => getQueryValue("capitalCategory") || "all"
+  );
+  const [capitalFundTypeFilter, setCapitalFundTypeFilter] = useState(
+    () => getQueryValue("capitalFund") || "all"
+  );
+  const [capitalProjectTypeFilter, setCapitalProjectTypeFilter] = useState(
+    () => getQueryValue("capitalType") || "all"
+  );
   const selectedState = STATE_BY_CODE[selectedStateCode];
   const activeState = STATE_BY_CODE[activeStateCode];
   const canOpenSelectedState = Boolean(selectedState?.isConnected);
@@ -1699,6 +2203,12 @@ export default function App() {
     setVendorSearchQuery("");
     setVendorAgencyFilter("all");
     setVendorCategoryFilter("all");
+    setCapitalSearchQuery("");
+    setCapitalAgencyFilter("all");
+    setCapitalCountyFilter("all");
+    setCapitalCategoryFilter("all");
+    setCapitalFundTypeFilter("all");
+    setCapitalProjectTypeFilter("all");
     setTraceMessage("");
     setTraceRow(null);
   }
@@ -1710,15 +2220,21 @@ export default function App() {
     setVendorPaymentYears([]);
     setSelectedVendorYear("");
     setVendorPaymentDetail(null);
+    setCapitalProjectYears([]);
+    setSelectedCapitalYear("");
+    setCapitalProjectDetail(null);
     setSourceMetadata(DEFAULT_SOURCE_METADATA);
     setErrorMessage("");
     setVendorErrorMessage("");
+    setCapitalErrorMessage("");
     setTraceMessage("");
     setTraceRow(null);
     setLoadingYears(false);
     setLoadingDetail(false);
     setLoadingVendorYears(false);
     setLoadingVendorPayments(false);
+    setLoadingCapitalYears(false);
+    setLoadingCapitalProjects(false);
     resetFilters();
   }
 
@@ -1743,10 +2259,14 @@ export default function App() {
     } else if (value === "vendor_payments") {
       setAnalysisMode("payments");
       setCoverageSourceId("vendor-payments");
+    } else if (value === "capital_projects") {
+      setAnalysisMode("capital");
+      setCoverageSourceId("capital-budget");
     } else if (
       analysisMode === "accountability" ||
       analysisMode === "coverage" ||
-      analysisMode === "payments"
+      analysisMode === "payments" ||
+      analysisMode === "capital"
     ) {
       setAnalysisMode("overview");
     }
@@ -1782,6 +2302,14 @@ export default function App() {
       return;
     }
 
+    if (value === "capital") {
+      if (questionMode !== "capital_projects") {
+        setQuestionMode("capital_projects");
+      }
+      setCoverageSourceId("capital-budget");
+      return;
+    }
+
     if (value === "accountability") {
       if (questionMode !== "education_outcomes") {
         setQuestionMode("education_outcomes");
@@ -1789,7 +2317,11 @@ export default function App() {
       return;
     }
 
-    if (questionMode === "vendor_payments" || questionMode === "education_outcomes") {
+    if (
+      questionMode === "vendor_payments" ||
+      questionMode === "capital_projects" ||
+      questionMode === "education_outcomes"
+    ) {
       setQuestionMode("latest");
     }
   }
@@ -1977,6 +2509,107 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!activeStateCode || questionMode !== "capital_projects") return undefined;
+
+    const controller = new AbortController();
+
+    async function loadCapitalYears() {
+      setLoadingCapitalYears(true);
+      setCapitalErrorMessage("");
+
+      try {
+        const payload = await fetchCapitalProjectYears(controller.signal);
+        const years = payload.years;
+
+        if (!years.length) {
+          throw new Error("No Maryland capital-project years were returned.");
+        }
+
+        setCapitalProjectYears(years);
+        const requestedYear = years.find(
+          (year) =>
+            String(year.fiscalYear) === String(initialCapitalYearRequest) ||
+            String(year.fiscalYear) === String(selectedYear)
+        );
+        setSelectedCapitalYear(String((requestedYear || years[0]).fiscalYear));
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setCapitalErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingCapitalYears(false);
+      }
+    }
+
+    loadCapitalYears();
+
+    return () => controller.abort();
+  }, [activeStateCode, initialCapitalYearRequest, questionMode, selectedYear]);
+
+  useEffect(() => {
+    if (
+      !activeStateCode ||
+      questionMode !== "capital_projects" ||
+      !selectedCapitalYear
+    ) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+
+    async function loadCapitalProjects() {
+      setCapitalProjectDetail(null);
+      setLoadingCapitalProjects(true);
+      setCapitalErrorMessage("");
+      setTraceMessage("");
+      setTraceRow(null);
+
+      try {
+        const detail = await fetchCapitalProjectDetail(
+          {
+            fiscalYear: Number(selectedCapitalYear),
+            searchQuery: capitalSearchQuery,
+            agencyFilter: capitalAgencyFilter,
+            countyFilter: capitalCountyFilter,
+            categoryFilter: capitalCategoryFilter,
+            fundTypeFilter: capitalFundTypeFilter,
+            projectTypeFilter: capitalProjectTypeFilter,
+          },
+          controller.signal
+        );
+
+        if (!detail) {
+          throw new Error(
+            `No capital-project detail was returned for FY ${selectedCapitalYear}.`
+          );
+        }
+
+        setCapitalProjectDetail(detail);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setCapitalErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingCapitalProjects(false);
+      }
+    }
+
+    loadCapitalProjects();
+
+    return () => controller.abort();
+  }, [
+    activeStateCode,
+    capitalAgencyFilter,
+    capitalCategoryFilter,
+    capitalCountyFilter,
+    capitalFundTypeFilter,
+    capitalProjectTypeFilter,
+    capitalSearchQuery,
+    questionMode,
+    selectedCapitalYear,
+  ]);
+
+  useEffect(() => {
     if (!activeStateCode || typeof window === "undefined") return;
 
     const params = new URLSearchParams();
@@ -1984,7 +2617,11 @@ export default function App() {
     if (selectedYear) params.set("year", selectedYear);
     params.set("mode", analysisMode);
     params.set("question", questionMode);
-    if (analysisMode === "coverage" || questionMode === "vendor_payments") {
+    if (
+      analysisMode === "coverage" ||
+      questionMode === "vendor_payments" ||
+      questionMode === "capital_projects"
+    ) {
       params.set("source", coverageSourceId);
     }
     if (questionMode === "vendor_payments") {
@@ -1997,6 +2634,27 @@ export default function App() {
       }
       if (vendorCategoryFilter !== "all") {
         params.set("vendorCategory", vendorCategoryFilter);
+      }
+    }
+    if (questionMode === "capital_projects") {
+      if (selectedCapitalYear) params.set("capitalYear", selectedCapitalYear);
+      if (capitalSearchQuery.trim()) {
+        params.set("capitalSearch", capitalSearchQuery.trim());
+      }
+      if (capitalAgencyFilter !== "all") {
+        params.set("capitalAgency", capitalAgencyFilter);
+      }
+      if (capitalCountyFilter !== "all") {
+        params.set("capitalCounty", capitalCountyFilter);
+      }
+      if (capitalCategoryFilter !== "all") {
+        params.set("capitalCategory", capitalCategoryFilter);
+      }
+      if (capitalFundTypeFilter !== "all") {
+        params.set("capitalFund", capitalFundTypeFilter);
+      }
+      if (capitalProjectTypeFilter !== "all") {
+        params.set("capitalType", capitalProjectTypeFilter);
       }
     }
     if (searchQuery.trim()) params.set("search", searchQuery.trim());
@@ -2019,12 +2677,19 @@ export default function App() {
     agencyFilter,
     analysisMode,
     budgetStageFilter,
+    capitalAgencyFilter,
+    capitalCategoryFilter,
+    capitalCountyFilter,
+    capitalFundTypeFilter,
+    capitalProjectTypeFilter,
+    capitalSearchQuery,
     categoryFilter,
     coverageSourceId,
     fundFilter,
     questionMode,
     rowLimit,
     searchQuery,
+    selectedCapitalYear,
     selectedYear,
     sortMode,
     selectedVendorYear,
@@ -2137,20 +2802,28 @@ export default function App() {
   const displayMetadata =
     questionMode === "vendor_payments"
       ? vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA
+      : questionMode === "capital_projects"
+        ? capitalProjectDetail?.metadata || DEFAULT_CAPITAL_PROJECT_METADATA
       : metadata;
   const displaySourceLastUpdated =
     questionMode === "vendor_payments"
       ? displayMetadata.dataLastUpdated || VENDOR_PAYMENTS_LAST_UPDATED
+      : questionMode === "capital_projects"
+        ? displayMetadata.dataLastUpdated || CAPITAL_PROJECTS_LAST_UPDATED
       : SOURCE_LAST_MODIFIED;
   const displayMetadataUpdated =
     questionMode === "vendor_payments"
       ? displayMetadata.metadataUpdated || VENDOR_PAYMENTS_METADATA_UPDATED
+      : questionMode === "capital_projects"
+        ? displayMetadata.metadataUpdated || CAPITAL_PROJECTS_METADATA_UPDATED
       : SOURCE_METADATA_UPDATED;
   const activeQuestion =
     QUESTION_OPTIONS.find((option) => option.value === questionMode) ||
     QUESTION_OPTIONS[0];
   const hidesAllocationTable =
-    questionMode === "vendor_payments" || questionMode === "education_outcomes";
+    questionMode === "vendor_payments" ||
+    questionMode === "capital_projects" ||
+    questionMode === "education_outcomes";
   const showsAllocationViews =
     ["overview", "drilldown"].includes(analysisMode) && !hidesAllocationTable;
   const hasActiveFilters =
@@ -2164,7 +2837,13 @@ export default function App() {
     rowLimit !== "100" ||
     vendorSearchQuery.trim() ||
     vendorAgencyFilter !== "all" ||
-    vendorCategoryFilter !== "all";
+    vendorCategoryFilter !== "all" ||
+    capitalSearchQuery.trim() ||
+    capitalAgencyFilter !== "all" ||
+    capitalCountyFilter !== "all" ||
+    capitalCategoryFilter !== "all" ||
+    capitalFundTypeFilter !== "all" ||
+    capitalProjectTypeFilter !== "all";
 
   function exportFilteredCsv() {
     if (!displayedRows.length) return;
@@ -2266,6 +2945,61 @@ export default function App() {
     setTraceMessage(`Exported ${payments.length} grouped vendor-payment rows as CSV.`);
   }
 
+  function exportCapitalProjectCsv() {
+    const projects = capitalProjectDetail?.projects || [];
+
+    if (!projects.length) return;
+
+    const headers = [
+      "Fiscal Year",
+      "Budget Stage",
+      "Agency",
+      "County",
+      "Project / Program",
+      "Category",
+      "Record Type",
+      "Fund Type",
+      "Amount",
+      "% FY Capital Total",
+      "PDF Page",
+      "Source",
+      "Confidence",
+      "Notes",
+    ];
+    const lines = [
+      headers.map(csvEscape).join(","),
+      ...projects.map((project) =>
+        [
+          project.fiscalYear,
+          project.budgetStage,
+          project.agencyName,
+          project.county,
+          project.projectTitle,
+          project.category,
+          project.projectType,
+          project.fundType,
+          project.dollarAmount,
+          project.percentage.toFixed(4),
+          project.sourcePage,
+          project.sourceLabel,
+          project.confidence,
+          project.notes,
+        ]
+          .map(csvEscape)
+          .join(",")
+      ),
+    ];
+    const csv = lines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `maryland-capital-projects-fy-${selectedCapitalYear}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setTraceMessage(`Exported ${projects.length} capital-project rows as CSV.`);
+  }
+
   async function copyViewLink() {
     if (typeof window === "undefined") return;
 
@@ -2278,7 +3012,11 @@ export default function App() {
   }
 
   async function copySourceCitation() {
-    const citation = `${displayMetadata.sourceLabel}. Maryland Open Data. ${displayMetadata.sourceUrl}. Data last modified ${displaySourceLastUpdated}; metadata updated ${displayMetadataUpdated}.`;
+    const publisher =
+      questionMode === "capital_projects"
+        ? "Maryland Department of Budget and Management"
+        : "Maryland Open Data";
+    const citation = `${displayMetadata.sourceLabel}. ${publisher}. ${displayMetadata.sourceUrl}. Data last modified ${displaySourceLastUpdated}; metadata updated ${displayMetadataUpdated}.`;
 
     try {
       await navigator.clipboard.writeText(citation);
@@ -2303,6 +3041,31 @@ export default function App() {
     setTraceRow(buildVendorTraceRow(payment, vendorPaymentDetail));
     setTraceMessage(`Trace opened for ${payment.vendorName}.`);
   }
+
+  function handleCapitalTrace(project) {
+    setTraceRow(buildCapitalTraceRow(project, capitalProjectDetail));
+    setTraceMessage(`Trace opened for ${project.projectTitle}.`);
+  }
+
+  const activeStateName = activeState?.name || "Selected state";
+  const heroModeLabel =
+    questionMode === "vendor_payments"
+      ? "vendor payments"
+      : questionMode === "capital_projects"
+        ? "capital budget"
+        : "operating budget";
+  const heroTitle =
+    questionMode === "vendor_payments"
+      ? `${activeStateName} Vendor Payments`
+      : questionMode === "capital_projects"
+        ? `${activeStateName} Capital Projects`
+        : `${activeStateName} Operating Budget`;
+  const heroDescription =
+    questionMode === "vendor_payments"
+      ? "Explore official vendor-payment records beside operating-budget context without mixing transaction data into budget allocations."
+      : questionMode === "capital_projects"
+        ? "Explore enacted capital-budget projects and programs beside operating-budget context without mixing long-term authorizations into recurring allocations."
+        : "Explore official operating-budget allocations by year, stage, agency, program, category, and fund type. Education outcomes are connected through official MSDE and NCES/NAEP releases, and broader budget sources are mapped separately.";
 
   if (!activeState) {
     return (
@@ -2366,14 +3129,11 @@ export default function App() {
     <main className="page">
       <header className="hero">
         <div className="hero-copy">
-          <p className="eyebrow">{activeState.name} state operating budget</p>
-          <h1>{activeState.name} Operating Budget</h1>
-          <p>
-            Explore official operating-budget allocations by year, stage, agency,
-            program, category, and fund type. Education outcomes are connected
-            through official MSDE and NCES/NAEP releases, and broader budget
-            sources are mapped separately.
+          <p className="eyebrow">
+            {activeState.name} state {heroModeLabel}
           </p>
+          <h1>{heroTitle}</h1>
+          <p>{heroDescription}</p>
         </div>
 
         <aside className="source-panel" aria-label="Official data source">
@@ -2397,7 +3157,15 @@ export default function App() {
               <StageBadge stage={`FY ${selectedVendorYear}`} />
             </>
           )}
-          {questionMode !== "vendor_payments" && budgetDetail?.budgetStage && (
+          {questionMode === "capital_projects" && selectedCapitalYear && (
+            <>
+              <span>Capital fiscal year</span>
+              <StageBadge stage={`FY ${selectedCapitalYear} Enacted`} />
+            </>
+          )}
+          {questionMode !== "vendor_payments" &&
+            questionMode !== "capital_projects" &&
+            budgetDetail?.budgetStage && (
             <>
               <span>Budget stage</span>
               <StageBadge stage={budgetDetail.budgetStage} />
@@ -2587,7 +3355,7 @@ export default function App() {
         selectedYearLabel={selectedYearLabel}
       />
 
-      {(loadingYears || loadingDetail || loadingVendorYears) && (
+      {(loadingYears || loadingDetail || loadingVendorYears || loadingCapitalYears) && (
         <section className="loading-panel" aria-live="polite">
           <div className="spinner" />
           <p>
@@ -2595,7 +3363,9 @@ export default function App() {
               ? "Loading fiscal years..."
               : loadingVendorYears
                 ? "Loading vendor-payment fiscal years..."
-                : `Loading FY ${selectedYear} allocations...`}
+                : loadingCapitalYears
+                  ? "Loading capital-project fiscal years..."
+                  : `Loading FY ${selectedYear} allocations...`}
           </p>
         </section>
       )}
@@ -2609,6 +3379,8 @@ export default function App() {
             budgetStage={
               questionMode === "vendor_payments"
                 ? "Vendor payments"
+                : questionMode === "capital_projects"
+                  ? "Capital projects"
                 : budgetDetail.budgetStage
             }
           />
@@ -2618,6 +3390,8 @@ export default function App() {
             aria-label={
               questionMode === "vendor_payments"
                 ? "Budget and vendor payment summary"
+                : questionMode === "capital_projects"
+                  ? "Budget and capital project summary"
                 : "Budget summary"
             }
           >
@@ -2625,6 +3399,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? `FY ${budgetDetail.fiscalYear} operating-budget total`
+                  : questionMode === "capital_projects"
+                    ? `FY ${budgetDetail.fiscalYear} operating-budget total`
                   : `FY ${budgetDetail.fiscalYear} positive budget total`
               }
               value={formatMoney(budgetDetail.totalAmount)}
@@ -2634,6 +3410,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Operating-budget line items"
+                  : questionMode === "capital_projects"
+                    ? "Operating-budget line items"
                   : "Source line items"
               }
               value={formatNumber(budgetDetail.rowCount)}
@@ -2643,6 +3421,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Grouped budget allocations returned"
+                  : questionMode === "capital_projects"
+                    ? "Grouped budget allocations returned"
                   : "Grouped allocations returned"
               }
               value={formatNumber(budgetDetail.allocations.length)}
@@ -2654,6 +3434,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Operating-budget stage"
+                  : questionMode === "capital_projects"
+                    ? "Operating-budget stage"
                   : "Budget stage"
               }
               value={budgetDetail.budgetStage}
@@ -2663,11 +3445,15 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? `FY ${selectedVendorYear || "selected"} vendor-payment total`
+                  : questionMode === "capital_projects"
+                    ? `FY ${selectedCapitalYear || "selected"} capital total`
                   : "Current filter total"
               }
               value={
                 questionMode === "vendor_payments"
                   ? formatMoney(vendorPaymentDetail?.totalAmount || 0)
+                  : questionMode === "capital_projects"
+                    ? formatMoney(capitalProjectDetail?.totalAmount || 0)
                   : formatMoney(filteredTotal)
               }
               detail={
@@ -2677,6 +3463,12 @@ export default function App() {
                         vendorPaymentDetail.rowCount
                       )} payment rows in official source`
                     : "Vendor payments load from the separate source below"
+                  : questionMode === "capital_projects"
+                    ? capitalProjectDetail
+                      ? `${formatNumber(
+                          capitalProjectDetail.rowCount
+                        )} capital rows in normalized source`
+                      : "Capital projects load from the separate source below"
                   : `${formatNumber(filteredRows.length)} matching allocations`
               }
             />
@@ -2721,6 +3513,33 @@ export default function App() {
               errorMessage={vendorErrorMessage}
               onTracePayment={handleVendorTrace}
               onExportPayments={exportVendorPaymentCsv}
+              onCopyCitation={copySourceCitation}
+              onCopyViewLink={copyViewLink}
+            />
+          )}
+
+          {(analysisMode === "capital" || questionMode === "capital_projects") && (
+            <CapitalProjectsPanel
+              capitalProjectYears={capitalProjectYears}
+              selectedCapitalYear={selectedCapitalYear}
+              onSelectedCapitalYearChange={setSelectedCapitalYear}
+              capitalSearchQuery={capitalSearchQuery}
+              onCapitalSearchQueryChange={setCapitalSearchQuery}
+              capitalAgencyFilter={capitalAgencyFilter}
+              onCapitalAgencyFilterChange={setCapitalAgencyFilter}
+              capitalCountyFilter={capitalCountyFilter}
+              onCapitalCountyFilterChange={setCapitalCountyFilter}
+              capitalCategoryFilter={capitalCategoryFilter}
+              onCapitalCategoryFilterChange={setCapitalCategoryFilter}
+              capitalFundTypeFilter={capitalFundTypeFilter}
+              onCapitalFundTypeFilterChange={setCapitalFundTypeFilter}
+              capitalProjectTypeFilter={capitalProjectTypeFilter}
+              onCapitalProjectTypeFilterChange={setCapitalProjectTypeFilter}
+              capitalProjectDetail={capitalProjectDetail}
+              loading={loadingCapitalProjects}
+              errorMessage={capitalErrorMessage}
+              onTraceProject={handleCapitalTrace}
+              onExportProjects={exportCapitalProjectCsv}
               onCopyCitation={copySourceCitation}
               onCopyViewLink={copyViewLink}
             />
@@ -2871,7 +3690,8 @@ export default function App() {
           </section>
           )}
 
-          {questionMode !== "vendor_payments" && (
+          {questionMode !== "vendor_payments" &&
+            questionMode !== "capital_projects" && (
             <footer className="data-note">
               {metadata.limitations.join(" ")}
               {budgetDetail.isAllocationCapped
@@ -2888,11 +3708,31 @@ export default function App() {
             row={traceRow}
             budgetDetail={budgetDetail}
             filters={{
-              searchQuery,
-              agencyFilter,
-              fundFilter,
+              searchQuery:
+                questionMode === "capital_projects"
+                  ? capitalSearchQuery
+                  : searchQuery,
+              agencyFilter:
+                questionMode === "capital_projects"
+                  ? capitalAgencyFilter
+                  : agencyFilter,
+              fundFilter:
+                questionMode === "capital_projects"
+                  ? capitalFundTypeFilter
+                  : fundFilter,
               budgetStageFilter,
-              categoryFilter,
+              categoryFilter:
+                questionMode === "capital_projects"
+                  ? capitalCategoryFilter
+                  : categoryFilter,
+              capitalCountyFilter:
+                questionMode === "capital_projects"
+                  ? capitalCountyFilter
+                  : undefined,
+              capitalProjectTypeFilter:
+                questionMode === "capital_projects"
+                  ? capitalProjectTypeFilter
+                  : undefined,
             }}
             onClose={() => setTraceRow(null)}
             onCopy={copyTrace}
