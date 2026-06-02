@@ -1,0 +1,112 @@
+export const BUDGET_COVERAGE_SOURCES = [
+  {
+    id: "operating-budget",
+    label: "Operating budget allocations",
+    status: "Live",
+    adapter: "Connected",
+    confidence: "High",
+    availability: "Current Maryland operating-budget open data.",
+    adds: "Agency, department, program, subprogram, category, fund type, fiscal year, amount, and budget stage.",
+    sourceLabel: "Maryland Operating Budget (current)",
+    sourceUrl:
+      "https://opendata.maryland.gov/Budget/Maryland-Operating-Budget-current-/yu65-jmmv",
+    limitations: [
+      "Allocation data, not every tax-dollar transaction.",
+      "Does not replace vendor-payment or capital-project datasets.",
+    ],
+  },
+  {
+    id: "budget-funding-sources",
+    label: "Budget funding sources",
+    status: "Source identified",
+    adapter: "Planned adapter",
+    confidence: "High",
+    availability: "Maryland Transparency Portal operating-budget funding-source views.",
+    adds: "A clearer general fund, special fund, federal fund, and other-fund funding picture.",
+    sourceLabel: "Maryland Transparency Portal",
+    sourceUrl: "https://mtp.maryland.gov/",
+    limitations: [
+      "Needs a normalized API adapter before table-level comparison is available in this app.",
+    ],
+  },
+  {
+    id: "vendor-payments",
+    label: "Vendor payments",
+    status: "Source identified",
+    adapter: "Planned adapter",
+    confidence: "High",
+    availability: "Payment data is available beginning fiscal year 2008.",
+    adds: "Agency-to-vendor payment summaries for vendors receiving at least $25,000 in a fiscal year.",
+    sourceLabel: "Maryland Transparency Portal vendor payments",
+    sourceUrl: "https://mtp.maryland.gov/",
+    limitations: [
+      "The portal excludes Maryland Judiciary, Legislative Branch, University System of Maryland, Morgan State University, and St. Mary's College payments.",
+      "Confidential payments and some individual payee data are not disclosed.",
+    ],
+  },
+  {
+    id: "grants-loans",
+    label: "State grants and loans",
+    status: "Source identified",
+    adapter: "Planned adapter",
+    confidence: "High",
+    availability: "Grant data begins in fiscal year 2009; loan data begins in fiscal year 2010.",
+    adds: "Recipient-level grant and loan payments of at least $50,000 to profit and nonprofit entities.",
+    sourceLabel: "State of Maryland Grants and Loans",
+    sourceUrl: "https://grantsandloans.maryland.gov/",
+    limitations: [
+      "Does not include payments to local or state government.",
+      "Does not include reimbursements to providers in a state program.",
+    ],
+  },
+  {
+    id: "capital-budget",
+    label: "Capital budget and projects",
+    status: "Source identified",
+    adapter: "Needs normalization",
+    confidence: "High",
+    availability: "Capital budget bills, analyses, and resources are published by DBM and DLS.",
+    adds: "Debt-authorized capital projects, bond bills, and agency capital-program context.",
+    sourceLabel: "Maryland DBM and DLS capital budget resources",
+    sourceUrl: "https://dbm.maryland.gov/budget/Pages/capbudhome.aspx",
+    secondaryUrl: "https://dls.maryland.gov/budget/capital/",
+    limitations: [
+      "Capital documents are not yet normalized into the same row model as operating-budget allocations.",
+    ],
+  },
+  {
+    id: "local-education-spending",
+    label: "Local education spending",
+    status: "External source needed",
+    adapter: "Not connected",
+    confidence: "Medium",
+    availability: "Often published by local school systems, counties, and state report-card downloads.",
+    adds: "District-level school spending that is not fully represented by state operating-budget allocations.",
+    sourceLabel: "Maryland Report Card and local school system finance sources",
+    sourceUrl: "https://reportcard.msde.maryland.gov/",
+    limitations: [
+      "Requires local-source normalization before statewide comparisons are reliable.",
+    ],
+  },
+];
+
+export const COVERAGE_IMPLEMENTATION_STEPS = [
+  {
+    phase: "Phase 3A",
+    label: "Normalize source registry",
+    status: "Added",
+    detail: "The app now names each official source, adapter status, confidence, and exclusion.",
+  },
+  {
+    phase: "Phase 3B",
+    label: "Add live adapters",
+    status: "Next",
+    detail: "Vendor payments, grants/loans, funding sources, and capital projects need API or scraper adapters.",
+  },
+  {
+    phase: "Phase 3C",
+    label: "Cross-source reconciliation",
+    status: "Next",
+    detail: "After adapters exist, the app can compare allocations, actuals, payments, and project records without mixing definitions.",
+  },
+];
