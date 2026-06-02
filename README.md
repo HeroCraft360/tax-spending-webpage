@@ -1,16 +1,31 @@
-# React + Vite
+# Maryland Operating Budget Explorer
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React/Vite dashboard for exploring Maryland operating budget allocations by
+fiscal year, agency, program, unit, and fund type.
 
-Currently, two official plugins are available:
+## Data Source
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The app queries Maryland's Socrata open-data API for the current operating
+budget dataset:
 
-## React Compiler
+- Dataset: Maryland Operating Budget (current)
+- Identifier: `yu65-jmmv`
+- Source: https://opendata.maryland.gov/Budget/Maryland-Operating-Budget-current-/yu65-jmmv
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The app uses the same-origin `/api/maryland-budget` route to run server-side
+Socrata aggregation. That keeps the browser from downloading the full dataset
+and avoids CORS issues with the upstream open-data API.
 
-## Expanding the ESLint configuration
+## Development
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+npm install
+npm run dev
+```
+
+## Checks
+
+```bash
+npm run lint
+npm run build
+```

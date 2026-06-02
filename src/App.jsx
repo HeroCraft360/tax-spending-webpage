@@ -1,20 +1,38 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  PieChart,
-  Pie,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from "recharts";
+  fetchBudgetDetail,
+  fetchBudgetYears,
+  SOURCE_LABEL,
+  SOURCE_LAST_MODIFIED,
+  SOURCE_METADATA_UPDATED,
+  SOURCE_URL,
+} from "./data/marylandBudget";
 import "./App.css";
 
-const MARYLAND_DATA_URL =
-  "https://opendata.maryland.gov/resource/4mca-332u.json?$limit=50000&$order=fiscal_year DESC";
-
-const SOURCE_URL =
-  "https://opendata.maryland.gov/Budget/Maryland-Operating-Budget-CUR-and-CR/4mca-332u";
+const ROW_LIMITS = ["50", "100", "250", "all"];
+const BAR_COLORS = [
+  "#0f766e",
+  "#2563eb",
+  "#b45309",
+  "#7c3aed",
+  "#be123c",
+  "#047857",
+  "#334155",
+  "#0891b2",
+  "#a16207",
+  "#4f46e5",
+];
 
 function formatMoney(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: Math.abs(value || 0) >= 1_000_000_000 ? "compact" : "standard",
+    maximumFractionDigits: Math.abs(value || 0) >= 1_000_000_000 ? 1 : 0,
+  }).format(value || 0);
+}
+
+function formatFullMoney(value) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -22,422 +40,463 @@ function formatMoney(value) {
   }).format(value || 0);
 }
 
+function formatNumber(value) {
+  return new Intl.NumberFormat("en-US").format(value || 0);
+}
+
 function formatPercent(value) {
   return `${(value || 0).toFixed(2)}%`;
 }
 
-function cleanNumber(value) {
-  if (value === null || value === undefined) return 0;
-  const number = Number(String(value).replace(/[$,]/g, ""));
-  return Number.isFinite(number) ? number : 0;
+function getFiscalRange(years) {
+  if (!years.length) return "Loading";
+
+  const fiscalYears = years.map((year) => year.fiscalYear);
+  return `FY ${Math.min(...fiscalYears)} to FY ${Math.max(...fiscalYears)}`;
 }
 
-function findField(row, possibleNames) {
-  for (const name of possibleNames) {
-    if (row[name] !== undefined && row[name] !== null && row[name] !== "") {
-      return row[name];
-    }
+function sortRows(rows, sortMode) {
+  const sorted = [...rows];
+
+  if (sortMode === "agency") {
+    return sorted.sort((a, b) => a.agencyName.localeCompare(b.agencyName));
   }
 
-  return "";
-}
-
-function getFiscalYear(row) {
-  const value = findField(row, [
-    "fiscal_year",
-    "fiscal_year_",
-    "fy",
-    "budget_fiscal_year",
-    "year",
-  ]);
-
-  const match = String(value).match(/\d{4}/);
-  return match ? Number(match[0]) : null;
-}
-
-function getAmount(row) {
-  const possibleAmountFields = [
-    "amount",
-    "budget_amount",
-    "actual_expenditures",
-    "expenditures",
-    "appropriation",
-    "total",
-  ];
-
-  for (const field of possibleAmountFields) {
-    const number = cleanNumber(row[field]);
-    if (number !== 0) return number;
+  if (sortMode === "program") {
+    return sorted.sort((a, b) => a.programName.localeCompare(b.programName));
   }
 
-  for (const [key, value] of Object.entries(row)) {
-    const lowerKey = key.toLowerCase();
-
-    if (
-      lowerKey.includes("amount") ||
-      lowerKey.includes("budget") ||
-      lowerKey.includes("expenditure") ||
-      lowerKey.includes("appropriation")
-    ) {
-      const number = cleanNumber(value);
-      if (number !== 0) return number;
-    }
-  }
-
-  return 0;
+  return sorted.sort((a, b) => b.dollarAmount - a.dollarAmount);
 }
 
-function getAssignedName(row) {
+function MetricCard({ label, value, detail }) {
   return (
-    findField(row, [
-      "program_name",
-      "program",
-      "subprogram_name",
-      "subprogram",
-      "object_name",
-      "object",
-      "agency_subobject_name",
-      "comptroller_subobject_name",
-      "fund_type_name",
-      "fund_type",
-    ]) || "Uncategorized"
+    <article className="metric-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </article>
   );
 }
 
-function getAgencyName(row) {
+function MiniBreakdown({ title, rows }) {
   return (
-    findField(row, [
-      "agency_name",
-      "agency",
-      "department_name",
-      "department",
-      "unit_name",
-      "unit",
-    ]) || "Unknown agency"
+    <section className="panel">
+      <div className="panel-heading">
+        <h2>{title}</h2>
+      </div>
+
+      <div className="mini-list">
+        {rows.map((row) => (
+          <div className="mini-row" key={row.name}>
+            <span>{row.name}</span>
+            <strong>{formatMoney(row.dollarAmount)}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
-function getFundType(row) {
-  return (
-    findField(row, ["fund_type_name", "fund_type", "fund", "fund_name"]) ||
-    "Unknown fund type"
-  );
-}
+function BudgetBars({ rows }) {
+  const maxAmount = rows[0]?.dollarAmount || 0;
 
-function getBudgetStage(row) {
-  const rowText = Object.values(row).join(" ").toLowerCase();
-
-  if (rowText.includes("actual")) return "Actual";
-  if (rowText.includes("working")) return "Working";
-  if (rowText.includes("allowance")) return "Allowance";
-  if (rowText.includes("appropriation")) return "Appropriation";
-  if (rowText.includes("estimated")) return "Estimated";
-
-  return "Latest available";
-}
-
-function processMarylandRows(rawRows) {
-  const processed = rawRows
-    .map((row) => ({
-      raw: row,
-      fiscalYear: getFiscalYear(row),
-      amount: getAmount(row),
-      budgetStage: getBudgetStage(row),
-    }))
-    .filter((item) => item.fiscalYear && item.amount > 0);
-
-  const latestYears = [...new Set(processed.map((item) => item.fiscalYear))]
-    .sort((a, b) => b - a)
-    .slice(0, 4)
-    .sort((a, b) => a - b);
-
-  const selectedRows = processed.filter((item) =>
-    latestYears.includes(item.fiscalYear)
-  );
-
-  const stageByYear = {};
-
-  for (const item of selectedRows) {
-    if (!stageByYear[item.fiscalYear]) {
-      stageByYear[item.fiscalYear] = new Set();
-    }
-
-    stageByYear[item.fiscalYear].add(item.budgetStage);
+  if (!rows.length) {
+    return <p className="empty-state">No allocations match the current filters.</p>;
   }
 
-  const yearLabels = Object.fromEntries(
-    Object.entries(stageByYear).map(([year, stages]) => [
-      year,
-      [...stages].join(", "),
-    ])
+  return (
+    <div className="bar-list">
+      {rows.map((row, index) => {
+        const width = maxAmount > 0 ? (row.dollarAmount / maxAmount) * 100 : 0;
+
+        return (
+          <div
+            className="bar-row"
+            key={`${row.agencyName}-${row.unitName}-${row.programName}-${row.fundType}`}
+          >
+            <div className="bar-row-top">
+              <span>{row.programName}</span>
+              <strong>{formatMoney(row.dollarAmount)}</strong>
+            </div>
+            <div className="bar-track" aria-hidden="true">
+              <div
+                className="bar-fill"
+                style={{
+                  "--bar-width": `${width}%`,
+                  "--bar-color": BAR_COLORS[index % BAR_COLORS.length],
+                }}
+              />
+            </div>
+            <div className="bar-row-meta">
+              <span>{row.agencyName}</span>
+              <span>{formatPercent(row.percentage)}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
-
-  const grouped = new Map();
-
-  for (const item of selectedRows) {
-    const row = item.raw;
-
-    const assignedName = getAssignedName(row);
-    const agencyName = getAgencyName(row);
-    const fundType = getFundType(row);
-
-    const key = `${agencyName}__${assignedName}__${fundType}`;
-
-    if (!grouped.has(key)) {
-      grouped.set(key, {
-        assignedName,
-        agencyName,
-        fundType,
-        dollarAmount: 0,
-        yearlyAmounts: {},
-      });
-    }
-
-    const group = grouped.get(key);
-    group.dollarAmount += item.amount;
-    group.yearlyAmounts[item.fiscalYear] =
-      (group.yearlyAmounts[item.fiscalYear] || 0) + item.amount;
-  }
-
-  const totalAmount = [...grouped.values()].reduce(
-    (sum, row) => sum + row.dollarAmount,
-    0
-  );
-
-  const rows = [...grouped.values()]
-    .map((row) => ({
-      ...row,
-      percentage: totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0,
-    }))
-    .sort((a, b) => b.dollarAmount - a.dollarAmount);
-
-  return {
-    state: "Maryland",
-    stateCode: "MD",
-    years: latestYears,
-    yearLabels,
-    totalAmount,
-    rows,
-  };
 }
 
 export default function App() {
-  const [selectedState, setSelectedState] = useState("");
-  const [spendingData, setSpendingData] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [budgetYears, setBudgetYears] = useState([]);
+  const [selectedYear, setSelectedYear] = useState("");
+  const [budgetDetail, setBudgetDetail] = useState(null);
+  const [loadingYears, setLoadingYears] = useState(true);
+  const [loadingDetail, setLoadingDetail] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [agencyFilter, setAgencyFilter] = useState("all");
+  const [fundFilter, setFundFilter] = useState("all");
+  const [sortMode, setSortMode] = useState("amount");
+  const [rowLimit, setRowLimit] = useState("100");
 
-  async function handleStateChange(event) {
-    const state = event.target.value;
+  useEffect(() => {
+    const controller = new AbortController();
 
-    setSelectedState(state);
-    setSpendingData(null);
-    setErrorMessage("");
+    async function loadYears() {
+      setLoadingYears(true);
+      setErrorMessage("");
 
-    if (!state) return;
+      try {
+        const years = await fetchBudgetYears(controller.signal);
 
-    if (state !== "MD") {
-      setErrorMessage("Only Maryland is available in the first version.");
-      return;
-    }
-
-    setLoading(true);
-
-    try {
-      const response = await fetch(MARYLAND_DATA_URL);
-
-      if (!response.ok) {
-        throw new Error("Could not load Maryland spending data.");
-      }
-
-      const rawRows = await response.json();
-      const processedData = processMarylandRows(rawRows);
-
-      if (!processedData.rows.length) {
-        throw new Error(
-          "The data loaded, but no usable spending rows were found. We may need to adjust the dataset field names."
-        );
-      }
-
-      setSpendingData(processedData);
-    } catch (error) {
-      setErrorMessage(error.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const pieData = spendingData
-    ? (() => {
-        const topRows = spendingData.rows.slice(0, 8);
-        const otherRows = spendingData.rows.slice(8);
-
-        const otherTotal = otherRows.reduce(
-          (sum, row) => sum + row.dollarAmount,
-          0
-        );
-
-        const chartRows = topRows.map((row) => ({
-          name: row.assignedName,
-          value: row.dollarAmount,
-        }));
-
-        if (otherTotal > 0) {
-          chartRows.push({
-            name: "Other",
-            value: otherTotal,
-          });
+        if (!years.length) {
+          throw new Error("No Maryland budget years were returned.");
         }
 
-        return chartRows;
-      })()
-    : [];
+        setBudgetYears(years);
+        setSelectedYear(String(years[0].fiscalYear));
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingYears(false);
+      }
+    }
+
+    loadYears();
+
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedYear) return undefined;
+
+    const controller = new AbortController();
+
+    async function loadBudgetDetail() {
+      setBudgetDetail(null);
+      setLoadingDetail(true);
+      setErrorMessage("");
+      setSearchQuery("");
+      setAgencyFilter("all");
+      setFundFilter("all");
+
+      try {
+        const detail = await fetchBudgetDetail(
+          Number(selectedYear),
+          controller.signal
+        );
+
+        if (!detail.allocations.length) {
+          throw new Error(`No budget allocations were returned for FY ${selectedYear}.`);
+        }
+
+        setBudgetDetail(detail);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingDetail(false);
+      }
+    }
+
+    loadBudgetDetail();
+
+    return () => controller.abort();
+  }, [selectedYear]);
+
+  const agencyOptions = useMemo(() => {
+    if (!budgetDetail) return [];
+
+    return [...new Set(budgetDetail.allocations.map((row) => row.agencyName))]
+      .sort((a, b) => a.localeCompare(b))
+      .slice(0, 150);
+  }, [budgetDetail]);
+
+  const fundOptions = useMemo(() => {
+    if (!budgetDetail) return [];
+
+    return [...new Set(budgetDetail.allocations.map((row) => row.fundType))].sort(
+      (a, b) => a.localeCompare(b)
+    );
+  }, [budgetDetail]);
+
+  const filteredRows = useMemo(() => {
+    if (!budgetDetail) return [];
+
+    const query = searchQuery.trim().toLowerCase();
+    const rows = budgetDetail.allocations.filter((row) => {
+      const matchesAgency =
+        agencyFilter === "all" || row.agencyName === agencyFilter;
+      const matchesFund = fundFilter === "all" || row.fundType === fundFilter;
+      const matchesSearch =
+        !query ||
+        row.agencyName.toLowerCase().includes(query) ||
+        row.unitName.toLowerCase().includes(query) ||
+        row.programName.toLowerCase().includes(query) ||
+        row.fundType.toLowerCase().includes(query);
+
+      return matchesAgency && matchesFund && matchesSearch;
+    });
+
+    return sortRows(rows, sortMode);
+  }, [agencyFilter, budgetDetail, fundFilter, searchQuery, sortMode]);
+
+  const displayedRows =
+    rowLimit === "all"
+      ? filteredRows
+      : filteredRows.slice(0, Number(rowLimit));
+
+  const chartRows = [...filteredRows]
+    .sort((a, b) => b.dollarAmount - a.dollarAmount)
+    .slice(0, 10);
+
+  const filteredTotal = filteredRows.reduce(
+    (sum, row) => sum + row.dollarAmount,
+    0
+  );
+  const selectedYearSummary = budgetYears.find(
+    (year) => String(year.fiscalYear) === selectedYear
+  );
 
   return (
     <main className="page">
-      <section className="welcome-card">
-        <div className="welcome-left">
-          <h1>Welcome.</h1>
+      <header className="hero">
+        <div className="hero-copy">
+          <p className="eyebrow">Maryland open budget</p>
+          <h1>Maryland Operating Budget</h1>
+          <p>
+            Agency, program, and fund allocations from Maryland's current
+            operating budget open-data release.
+          </p>
+        </div>
 
-          <label htmlFor="state-select">Select your state</label>
+        <aside className="source-panel" aria-label="Official data source">
+          <span>Official source</span>
+          <a href={SOURCE_URL} target="_blank" rel="noreferrer">
+            {SOURCE_LABEL}
+          </a>
+          <small>Data last modified {SOURCE_LAST_MODIFIED}</small>
+          <small>Metadata updated {SOURCE_METADATA_UPDATED}</small>
+        </aside>
+      </header>
 
+      <section className="toolbar" aria-label="Budget controls">
+        <div className="control-field">
+          <label htmlFor="year-select">Fiscal year</label>
           <select
-            id="state-select"
-            value={selectedState}
-            onChange={handleStateChange}
+            id="year-select"
+            value={selectedYear}
+            onChange={(event) => setSelectedYear(event.target.value)}
+            disabled={loadingYears || !budgetYears.length}
           >
-            <option value="">Choose a state</option>
-            <option value="MD">Maryland</option>
+            {budgetYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear}
+              </option>
+            ))}
           </select>
         </div>
 
-        <div className="welcome-right">
-          <h2>Public Spending Finder</h2>
-          <p>
-            Select a state to see how public money was allocated across the
-            latest fiscal years available in official budget data.
-          </p>
-          <p>
-            This first version uses official Maryland open budget data. More
-            states can be added after the Maryland version is stable.
-          </p>
+        <div className="control-field control-field-wide">
+          <label htmlFor="search-input">Search</label>
+          <input
+            id="search-input"
+            type="search"
+            placeholder="Agency, unit, program, or fund"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            disabled={!budgetDetail}
+          />
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="agency-filter">Agency</label>
+          <select
+            id="agency-filter"
+            value={agencyFilter}
+            onChange={(event) => setAgencyFilter(event.target.value)}
+            disabled={!budgetDetail}
+          >
+            <option value="all">All agencies</option>
+            {agencyOptions.map((agency) => (
+              <option key={agency} value={agency}>
+                {agency}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="fund-filter">Fund type</label>
+          <select
+            id="fund-filter"
+            value={fundFilter}
+            onChange={(event) => setFundFilter(event.target.value)}
+            disabled={!budgetDetail}
+          >
+            <option value="all">All fund types</option>
+            {fundOptions.map((fundType) => (
+              <option key={fundType} value={fundType}>
+                {fundType}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="sort-select">Sort</label>
+          <select
+            id="sort-select"
+            value={sortMode}
+            onChange={(event) => setSortMode(event.target.value)}
+            disabled={!budgetDetail}
+          >
+            <option value="amount">Amount</option>
+            <option value="agency">Agency</option>
+            <option value="program">Program</option>
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="limit-select">Rows</label>
+          <select
+            id="limit-select"
+            value={rowLimit}
+            onChange={(event) => setRowLimit(event.target.value)}
+            disabled={!budgetDetail}
+          >
+            {ROW_LIMITS.map((limit) => (
+              <option key={limit} value={limit}>
+                {limit === "all" ? "All" : limit}
+              </option>
+            ))}
+          </select>
         </div>
       </section>
 
-      {loading && (
-        <section className="loading-card">
-          <div className="spinner"></div>
-          <p>Preparing Maryland spending data...</p>
+      {(loadingYears || loadingDetail) && (
+        <section className="loading-panel" aria-live="polite">
+          <div className="spinner" />
+          <p>
+            {loadingYears
+              ? "Loading fiscal years..."
+              : `Loading FY ${selectedYear} allocations...`}
+          </p>
         </section>
       )}
 
       {errorMessage && <p className="error-message">{errorMessage}</p>}
 
-      {spendingData && (
-        <section className="results-card">
-          <div className="results-header">
-            <div>
-              <h2>
-                Here is how {spendingData.state} allocated public funds from FY{" "}
-                {spendingData.years[0]} to FY{" "}
-                {spendingData.years[spendingData.years.length - 1]}
-              </h2>
+      {budgetDetail && !loadingDetail && (
+        <>
+          <section className="metrics-grid" aria-label="Budget summary">
+            <MetricCard
+              label={`FY ${budgetDetail.fiscalYear} positive budget total`}
+              value={formatMoney(budgetDetail.totalAmount)}
+              detail={formatFullMoney(budgetDetail.totalAmount)}
+            />
+            <MetricCard
+              label="Source line items"
+              value={formatNumber(budgetDetail.rowCount)}
+              detail="Rows with budget values above zero"
+            />
+            <MetricCard
+              label="Grouped allocations"
+              value={formatNumber(budgetDetail.allocations.length)}
+              detail="Agency, unit, program, and fund combinations"
+            />
+            <MetricCard
+              label="Current filter total"
+              value={formatMoney(filteredTotal)}
+              detail={`${formatNumber(filteredRows.length)} matching allocations`}
+            />
+          </section>
 
-              <p>
-                Data source:{" "}
-                <a href={SOURCE_URL} target="_blank" rel="noreferrer">
-                  Maryland Operating Budget: CUR and CR
-                </a>
-              </p>
-
-              <p className="chart-note">
-                Years included:{" "}
-                {spendingData.years
-                  .map(
-                    (year) =>
-                      `FY ${year} ${
-                        spendingData.yearLabels?.[year]
-                          ? `(${spendingData.yearLabels[year]})`
-                          : ""
-                      }`
-                  )
-                  .join(", ")}
-              </p>
-
-              <p className="chart-note">
-                Note: the latest available years may include working budgets,
-                allowances, appropriations, or estimates, not only final actual
-                expenditures.
-              </p>
-            </div>
-
-            <div className="summary-box">
-              <span>Total latest-period amount</span>
-              <strong>{formatMoney(spendingData.totalAmount)}</strong>
-              <small>{spendingData.rows.length} detailed rows found</small>
-            </div>
-          </div>
-
-          <div className="chart-and-table">
-            <div className="table-section">
-              <h3>Detailed allocation list</h3>
-
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Assigned Name</th>
-                      <th>Agency</th>
-                      <th>Fund Type</th>
-                      <th>Dollar Amount</th>
-                      <th>Percentage</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {spendingData.rows.map((row, index) => (
-                      <tr
-                        key={`${row.agencyName}-${row.assignedName}-${index}`}
-                      >
-                        <td>{row.assignedName}</td>
-                        <td>{row.agencyName}</td>
-                        <td>{row.fundType}</td>
-                        <td>{formatMoney(row.dollarAmount)}</td>
-                        <td>{formatPercent(row.percentage)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <section className="dashboard-grid">
+            <section className="panel panel-large">
+              <div className="panel-heading">
+                <div>
+                  <h2>Largest Program Allocations</h2>
+                  <p>Top results after the active filters, sorted by amount.</p>
+                </div>
+                <span>{getFiscalRange(budgetYears)}</span>
               </div>
+
+              <BudgetBars rows={chartRows} />
+            </section>
+
+            <div className="side-stack">
+              <MiniBreakdown title="Top Agencies" rows={budgetDetail.topAgencies} />
+              <MiniBreakdown title="Fund Types" rows={budgetDetail.fundTypes} />
+            </div>
+          </section>
+
+          <section className="table-panel">
+            <div className="panel-heading">
+              <div>
+                <h2>Allocation Detail</h2>
+                <p>
+                  Showing {formatNumber(displayedRows.length)} of{" "}
+                  {formatNumber(filteredRows.length)} matching grouped rows.
+                </p>
+              </div>
+              {selectedYearSummary && (
+                <span>{formatMoney(selectedYearSummary.totalAmount)}</span>
+              )}
             </div>
 
-            <div className="chart-section">
-              <h3>Pie chart by percentage</h3>
-
-              <ResponsiveContainer width="100%" height={380}>
-                <PieChart>
-                  <Pie
-                    data={pieData}
-                    dataKey="value"
-                    nameKey="name"
-                    outerRadius={120}
-                  />
-                  <Tooltip formatter={(value) => formatMoney(value)} />
-                  <Legend
-                    layout="vertical"
-                    verticalAlign="middle"
-                    align="right"
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-
-              <p className="chart-note">
-                The pie chart shows the top 8 rows plus “Other” so it stays
-                readable. The table keeps the full detailed list.
-              </p>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Program</th>
+                    <th>Agency</th>
+                    <th>Unit</th>
+                    <th>Fund Type</th>
+                    <th>Amount</th>
+                    <th>Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayedRows.map((row) => (
+                    <tr
+                      key={`${row.agencyName}-${row.unitName}-${row.programName}-${row.fundType}`}
+                    >
+                      <td>{row.programName}</td>
+                      <td>{row.agencyName}</td>
+                      <td>{row.unitName}</td>
+                      <td>{row.fundType}</td>
+                      <td>{formatFullMoney(row.dollarAmount)}</td>
+                      <td>{formatPercent(row.percentage)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          </div>
-        </section>
+          </section>
+
+          <footer className="data-note">
+            Maryland notes that this dataset can change as new data become
+            available and does not guarantee completeness. Budget phase varies
+            by fiscal year.
+          </footer>
+        </>
       )}
     </main>
   );
