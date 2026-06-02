@@ -48,13 +48,6 @@ function formatPercent(value) {
   return `${(value || 0).toFixed(2)}%`;
 }
 
-function getFiscalRange(years) {
-  if (!years.length) return "Loading";
-
-  const fiscalYears = years.map((year) => year.fiscalYear);
-  return `FY ${Math.min(...fiscalYears)} to FY ${Math.max(...fiscalYears)}`;
-}
-
 function sortRows(rows, sortMode) {
   const sorted = [...rows];
 
@@ -67,6 +60,24 @@ function sortRows(rows, sortMode) {
   }
 
   return sorted.sort((a, b) => b.dollarAmount - a.dollarAmount);
+}
+
+function getGroupedTotals(rows, fieldName, totalAmount, limit = 12) {
+  const grouped = new Map();
+
+  for (const row of rows) {
+    const name = row[fieldName] || "Unknown";
+    grouped.set(name, (grouped.get(name) || 0) + row.dollarAmount);
+  }
+
+  return [...grouped.entries()]
+    .map(([name, dollarAmount]) => ({
+      name,
+      dollarAmount,
+      percentage: totalAmount > 0 ? (dollarAmount / totalAmount) * 100 : 0,
+    }))
+    .sort((a, b) => b.dollarAmount - a.dollarAmount)
+    .slice(0, limit);
 }
 
 function MetricCard({ label, value, detail }) {
@@ -90,7 +101,10 @@ function MiniBreakdown({ title, rows }) {
         {rows.map((row) => (
           <div className="mini-row" key={row.name}>
             <span>{row.name}</span>
-            <strong>{formatMoney(row.dollarAmount)}</strong>
+            <strong>
+              {formatMoney(row.dollarAmount)}
+              <small>{formatPercent(row.percentage)}</small>
+            </strong>
           </div>
         ))}
       </div>
@@ -130,7 +144,9 @@ function BudgetBars({ rows }) {
             </div>
             <div className="bar-row-meta">
               <span>{row.agencyName}</span>
-              <span>{formatPercent(row.percentage)}</span>
+              <span>
+                {row.unitName} / {row.fundType} / {formatPercent(row.percentage)}
+              </span>
             </div>
           </div>
         );
@@ -151,6 +167,14 @@ export default function App() {
   const [fundFilter, setFundFilter] = useState("all");
   const [sortMode, setSortMode] = useState("amount");
   const [rowLimit, setRowLimit] = useState("100");
+
+  function resetFilters() {
+    setSearchQuery("");
+    setAgencyFilter("all");
+    setFundFilter("all");
+    setSortMode("amount");
+    setRowLimit("100");
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -270,9 +294,22 @@ export default function App() {
     (sum, row) => sum + row.dollarAmount,
     0
   );
+  const filteredAgencyRows = getGroupedTotals(
+    filteredRows,
+    "agencyName",
+    filteredTotal
+  );
+  const filteredFundRows = getGroupedTotals(filteredRows, "fundType", filteredTotal);
   const selectedYearSummary = budgetYears.find(
     (year) => String(year.fiscalYear) === selectedYear
   );
+  const selectedYearLabel = selectedYear ? `FY ${selectedYear}` : "Loading";
+  const hasActiveFilters =
+    searchQuery.trim() ||
+    agencyFilter !== "all" ||
+    fundFilter !== "all" ||
+    sortMode !== "amount" ||
+    rowLimit !== "100";
 
   return (
     <main className="page">
@@ -388,6 +425,19 @@ export default function App() {
             ))}
           </select>
         </div>
+
+        <div className="control-field">
+          <span className="control-label">Filters</span>
+          <button
+            id="reset-filters"
+            type="button"
+            aria-label="Reset filters"
+            onClick={resetFilters}
+            disabled={!budgetDetail || !hasActiveFilters}
+          >
+            Reset
+          </button>
+        </div>
       </section>
 
       {(loadingYears || loadingDetail) && (
@@ -435,15 +485,20 @@ export default function App() {
                   <h2>Largest Program Allocations</h2>
                   <p>Top results after the active filters, sorted by amount.</p>
                 </div>
-                <span>{getFiscalRange(budgetYears)}</span>
+                <span>
+                  {selectedYearLabel} / {formatNumber(filteredRows.length)} rows
+                </span>
               </div>
 
               <BudgetBars rows={chartRows} />
             </section>
 
             <div className="side-stack">
-              <MiniBreakdown title="Top Agencies" rows={budgetDetail.topAgencies} />
-              <MiniBreakdown title="Fund Types" rows={budgetDetail.fundTypes} />
+              <MiniBreakdown
+                title="Top Agencies In View"
+                rows={filteredAgencyRows}
+              />
+              <MiniBreakdown title="Fund Types In View" rows={filteredFundRows} />
             </div>
           </section>
 
@@ -457,7 +512,7 @@ export default function App() {
                 </p>
               </div>
               {selectedYearSummary && (
-                <span>{formatMoney(selectedYearSummary.totalAmount)}</span>
+                <span>{formatMoney(filteredTotal)}</span>
               )}
             </div>
 

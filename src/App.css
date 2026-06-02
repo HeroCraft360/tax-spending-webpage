@@ -107,10 +107,10 @@ a {
 
 .toolbar {
   display: grid;
-  grid-template-columns: 150px minmax(260px, 1fr) minmax(220px, 0.75fr) minmax(
+  grid-template-columns: 140px minmax(240px, 1fr) minmax(210px, 0.75fr) minmax(
       180px,
       0.6fr
-    ) 130px 110px;
+    ) 120px 100px 100px;
   gap: 14px;
   align-items: end;
   margin-bottom: 20px;
@@ -121,7 +121,8 @@ a {
   min-width: 0;
 }
 
-.control-field label {
+.control-field label,
+.control-label {
   display: block;
   margin-bottom: 7px;
   color: #334155;
@@ -130,7 +131,8 @@ a {
 }
 
 select,
-input {
+input,
+button {
   width: 100%;
   min-height: 42px;
   border: 1px solid #aab4c2;
@@ -148,14 +150,23 @@ input {
   padding: 0 12px;
 }
 
+button {
+  padding: 0 14px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
 select:disabled,
-input:disabled {
+input:disabled,
+button:disabled {
   color: #94a3b8;
   background: #f1f5f9;
+  cursor: not-allowed;
 }
 
 select:focus,
-input:focus {
+input:focus,
+button:focus {
   border-color: #0f766e;
   outline: 3px solid rgba(15, 118, 110, 0.18);
 }
@@ -273,6 +284,10 @@ input:focus {
   line-height: 1.35;
 }
 
+.bar-row-meta span:first-child {
+  min-width: 0;
+}
+
 .mini-list {
   display: grid;
   gap: 13px;
@@ -293,6 +308,18 @@ input:focus {
 
 .mini-row span {
   min-width: 0;
+}
+
+.mini-row strong {
+  display: grid;
+  gap: 3px;
+  justify-items: end;
+}
+
+.mini-row strong small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .table-wrap {
