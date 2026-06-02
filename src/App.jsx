@@ -57,6 +57,10 @@ const ANALYSIS_MODES = [
     label: "Compare Sources",
   },
   {
+    value: "reconcile",
+    label: "Reconcile Agencies",
+  },
+  {
     value: "payments",
     label: "Vendor Payments",
   },
@@ -377,6 +381,198 @@ function getGroupedTotals(rows, fieldName, totalAmount, limit = 12) {
     .slice(0, limit);
 }
 
+function normalizeAgencyName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function getAgencyCanonicalKey(value) {
+  const normalized = normalizeAgencyName(value);
+
+  if (!normalized) return "";
+
+  if (
+    /\bmdot\b/.test(normalized) ||
+    normalized.includes("transportation") ||
+    normalized.includes("transit administration") ||
+    normalized.includes("state highway admin") ||
+    normalized.includes("motor vehicle administration") ||
+    normalized.includes("aviation administration")
+  ) {
+    return "department transportation";
+  }
+
+  if (
+    normalized.includes("maryland department of health") ||
+    normalized.includes("department of health") ||
+    normalized.includes("medical care programs")
+  ) {
+    return "department health";
+  }
+
+  if (
+    normalized.includes("state department of education") ||
+    normalized.includes("department of education") ||
+    normalized.includes("aid to education")
+  ) {
+    return "state department education";
+  }
+
+  if (
+    normalized.includes("department of human services") ||
+    normalized.includes("local department operations")
+  ) {
+    return "department human services";
+  }
+
+  if (
+    normalized.includes("department of the environment") ||
+    normalized.includes("department environment")
+  ) {
+    return "department environment";
+  }
+
+  if (normalized.includes("interagency commission on school construction")) {
+    return "interagency commission school construction";
+  }
+
+  if (
+    normalized.includes("public debt") ||
+    normalized.includes("redemption and interest on state bonds")
+  ) {
+    return "public debt";
+  }
+
+  return normalized
+    .replace(/^state of maryland\s+/, "")
+    .replace(/^maryland\s+/, "")
+    .replace(/\bdept\b/g, "department")
+    .replace(/\badmin\b/g, "administration")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getAgencySourceTotals(rows, totalAmount) {
+  const grouped = new Map();
+
+  rows.forEach((row) => {
+    const key = getAgencyCanonicalKey(row.name);
+    if (!key) return;
+
+    const current = grouped.get(key) || {
+      key,
+      name: row.name,
+      dollarAmount: 0,
+      sourceNames: [],
+    };
+
+    current.dollarAmount += row.dollarAmount;
+    if (!current.sourceNames.includes(row.name)) {
+      current.sourceNames.push(row.name);
+    }
+    if (row.dollarAmount > (current.primaryAmount || 0)) {
+      current.name = row.name;
+      current.primaryAmount = row.dollarAmount;
+    }
+
+    grouped.set(key, current);
+  });
+
+  return [...grouped.values()].map((row) => ({
+    ...row,
+    percentage: totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0,
+  }));
+}
+
+function getAgencyMatchSummary({ operating, vendor, capital }) {
+  const sourceCount = [operating, vendor, capital].filter(Boolean).length;
+
+  if (sourceCount >= 3) {
+    return {
+      confidence: "High",
+      status: "Triangulated",
+      reason: "Matched across operating budget, vendor payments, and capital projects.",
+    };
+  }
+
+  if (sourceCount === 2) {
+    return {
+      confidence: "Medium",
+      status: "Partial match",
+      reason: "Matched across two connected sources; the missing source may use another label or may not have matching records in the loaded summary.",
+    };
+  }
+
+  return {
+    confidence: "Review",
+    status: "Single source",
+    reason: "Visible in one connected source only; use source tracing before treating it as a reconciliation match.",
+  };
+}
+
+function getPreferredAgencyName({ operating, vendor, capital }) {
+  return operating?.name || capital?.name || vendor?.name || "Unknown agency";
+}
+
+function getAgencyReconciliationRows({
+  operatingRows,
+  vendorRows,
+  capitalRows,
+  operatingTotal,
+  vendorTotal,
+  capitalTotal,
+}) {
+  const operatingTotals = getAgencySourceTotals(operatingRows, operatingTotal);
+  const vendorTotals = getAgencySourceTotals(vendorRows, vendorTotal);
+  const capitalTotals = getAgencySourceTotals(capitalRows, capitalTotal);
+  const keys = new Set([
+    ...operatingTotals.map((row) => row.key),
+    ...vendorTotals.map((row) => row.key),
+    ...capitalTotals.map((row) => row.key),
+  ]);
+
+  return [...keys]
+    .map((key) => {
+      const operating = operatingTotals.find((row) => row.key === key);
+      const vendor = vendorTotals.find((row) => row.key === key);
+      const capital = capitalTotals.find((row) => row.key === key);
+      const match = getAgencyMatchSummary({ operating, vendor, capital });
+      const maxAmount = Math.max(
+        operating?.dollarAmount || 0,
+        vendor?.dollarAmount || 0,
+        capital?.dollarAmount || 0
+      );
+
+      return {
+        key,
+        name: getPreferredAgencyName({ operating, vendor, capital }),
+        operating,
+        vendor,
+        capital,
+        matchConfidence: match.confidence,
+        matchStatus: match.status,
+        matchReason: match.reason,
+        sourceCount: [operating, vendor, capital].filter(Boolean).length,
+        maxAmount,
+        paymentScale:
+          operating?.dollarAmount > 0 && vendor?.dollarAmount
+            ? (vendor.dollarAmount / operating.dollarAmount) * 100
+            : null,
+        capitalScale:
+          operating?.dollarAmount > 0 && capital?.dollarAmount
+            ? (capital.dollarAmount / operating.dollarAmount) * 100
+            : null,
+      };
+    })
+    .sort((a, b) => {
+      if (b.sourceCount !== a.sourceCount) return b.sourceCount - a.sourceCount;
+      return b.maxAmount - a.maxAmount;
+    });
+}
+
 function getYearTrendRows(budgetYears) {
   const ascendingYears = [...budgetYears].sort(
     (a, b) => a.fiscalYear - b.fiscalYear
@@ -640,12 +836,15 @@ function QuestionNotice({ questionMode, selectedYearLabel, analysisMode }) {
   const notice =
     analysisMode === "compare"
       ? "Compare Sources keeps operating-budget allocations, vendor payments, and capital authorizations separate so scale checks do not imply a single reconciled total."
+      : analysisMode === "reconcile"
+        ? "Reconcile Agencies matches published agency labels across sources and flags confidence. Treat the results as review guidance, not audited accounting matches."
       : getQuestionNotice(questionMode, selectedYearLabel);
 
   return (
     <section
       className={
         analysisMode === "compare" ||
+        analysisMode === "reconcile" ||
         questionMode === "vendor_payments" ||
         questionMode === "education_outcomes"
           ? "question-notice warning"
@@ -905,37 +1104,14 @@ function ComparisonPanel({
   );
   const vendorAgencyRows = vendorPaymentDetail?.topAgencies || [];
   const capitalAgencyRows = capitalProjectDetail?.topAgencies || [];
-  const normalizeAgencyName = (value) =>
-    String(value || "")
-      .toLowerCase()
-      .replace(/&/g, "and")
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
-  const findAgencyRow = (rows, key) =>
-    rows.find((row) => normalizeAgencyName(row.name) === key);
-  const agencyMap = new Map();
-  const addAgencyRows = (rows, preferDisplayName = false) => {
-    rows.slice(0, 5).forEach((row) => {
-      const key = normalizeAgencyName(row.name);
-      if (!key) return;
-      if (!agencyMap.has(key) || preferDisplayName) {
-        agencyMap.set(key, row.name);
-      }
-    });
-  };
-
-  addAgencyRows(operatingAgencyRows, true);
-  addAgencyRows(vendorAgencyRows);
-  addAgencyRows(capitalAgencyRows);
-
-  const agencyComparisonRows = [...agencyMap.entries()]
-    .slice(0, 10)
-    .map(([key, name]) => ({
-      name,
-      operating: findAgencyRow(operatingAgencyRows, key),
-      vendor: findAgencyRow(vendorAgencyRows, key),
-      capital: findAgencyRow(capitalAgencyRows, key),
-    }));
+  const agencyComparisonRows = getAgencyReconciliationRows({
+    operatingRows: operatingAgencyRows.slice(0, 8),
+    vendorRows: vendorAgencyRows.slice(0, 8),
+    capitalRows: capitalAgencyRows.slice(0, 8),
+    operatingTotal: filteredTotal || budgetDetail.totalAmount,
+    vendorTotal: vendorPaymentDetail?.totalAmount || 0,
+    capitalTotal: capitalProjectDetail?.totalAmount || 0,
+  }).slice(0, 10);
   const topOperatingRow = [...filteredRows].sort(
     (a, b) => b.dollarAmount - a.dollarAmount
   )[0];
@@ -1242,6 +1418,442 @@ function ComparisonPanel({
         This comparison intentionally keeps source definitions separate. A future
         reconciliation view can match agency, program, procurement, and project
         identifiers where official records expose enough shared keys.
+      </footer>
+    </section>
+  );
+}
+
+function ReconciliationPanel({
+  budgetDetail,
+  filteredRows,
+  vendorPaymentYears,
+  selectedVendorYear,
+  onSelectedVendorYearChange,
+  vendorPaymentDetail,
+  loadingVendorYears,
+  loadingVendorPayments,
+  vendorErrorMessage,
+  capitalProjectYears,
+  selectedCapitalYear,
+  onSelectedCapitalYearChange,
+  capitalProjectDetail,
+  loadingCapitalYears,
+  loadingCapitalProjects,
+  capitalErrorMessage,
+  onOpenOperatingAgency,
+  onOpenVendorAgency,
+  onOpenCapitalAgency,
+}) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [matchFilter, setMatchFilter] = useState("all");
+  const [selectedAgencyKey, setSelectedAgencyKey] = useState("");
+  const filteredTotal = filteredRows.reduce(
+    (sum, row) => sum + row.dollarAmount,
+    0
+  );
+  const operatingAgencyRows = getGroupedTotals(
+    filteredRows,
+    "agencyName",
+    filteredTotal || budgetDetail.totalAmount,
+    200
+  );
+  const capitalAgencyRows = getGroupedTotals(
+    capitalProjectDetail?.projects || [],
+    "agencyName",
+    capitalProjectDetail?.totalAmount || 0,
+    200
+  );
+  const reconciliationRows = useMemo(
+    () =>
+      getAgencyReconciliationRows({
+        operatingRows: operatingAgencyRows,
+        vendorRows: vendorPaymentDetail?.topAgencies || [],
+        capitalRows: capitalAgencyRows,
+        operatingTotal: filteredTotal || budgetDetail.totalAmount,
+        vendorTotal: vendorPaymentDetail?.totalAmount || 0,
+        capitalTotal: capitalProjectDetail?.totalAmount || 0,
+      }),
+    [
+      budgetDetail.totalAmount,
+      capitalAgencyRows,
+      capitalProjectDetail?.totalAmount,
+      filteredTotal,
+      operatingAgencyRows,
+      vendorPaymentDetail?.topAgencies,
+      vendorPaymentDetail?.totalAmount,
+    ]
+  );
+  const visibleRows = useMemo(() => {
+    const query = normalizeAgencyName(searchQuery);
+
+    return reconciliationRows.filter((row) => {
+      const sourceNames = [
+        ...(row.operating?.sourceNames || []),
+        ...(row.vendor?.sourceNames || []),
+        ...(row.capital?.sourceNames || []),
+      ];
+      const matchesSearch =
+        !query ||
+        normalizeAgencyName(row.name).includes(query) ||
+        sourceNames.some((name) => normalizeAgencyName(name).includes(query));
+      const matchesFilter =
+        matchFilter === "all" ||
+        (matchFilter === "triangulated" && row.sourceCount === 3) ||
+        (matchFilter === "partial" && row.sourceCount === 2) ||
+        (matchFilter === "review" && row.sourceCount === 1);
+
+      return matchesSearch && matchesFilter;
+    });
+  }, [matchFilter, reconciliationRows, searchQuery]);
+
+  const selectedAgency =
+    visibleRows.find((row) => row.key === selectedAgencyKey) || visibleRows[0];
+  const triangulatedCount = reconciliationRows.filter(
+    (row) => row.sourceCount === 3
+  ).length;
+  const partialCount = reconciliationRows.filter(
+    (row) => row.sourceCount === 2
+  ).length;
+  const reviewCount = reconciliationRows.filter(
+    (row) => row.sourceCount === 1
+  ).length;
+  const loadingSourceData =
+    loadingVendorYears ||
+    loadingVendorPayments ||
+    loadingCapitalYears ||
+    loadingCapitalProjects;
+
+  function getSourceNames(row) {
+    return [
+      ...(row?.operating?.sourceNames || []),
+      ...(row?.vendor?.sourceNames || []),
+      ...(row?.capital?.sourceNames || []),
+    ];
+  }
+
+  function getGapItems(row) {
+    if (!row) return [];
+
+    return [
+      !row.operating
+        ? "No operating-budget agency match is visible in the current allocation filters."
+        : "",
+      !row.vendor
+        ? "No vendor-payment agency match appears in the loaded top-agency payment summary."
+        : "",
+      !row.capital
+        ? "No capital-project agency match appears in the normalized capital-project rows."
+        : "",
+      "Payment totals and capital authorizations are scale signals, not amounts subtracted from operating allocations.",
+      row.matchReason,
+    ].filter(Boolean);
+  }
+
+  return (
+    <section className="panel reconciliation-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Agency Reconciliation</h2>
+          <p>
+            Match agency labels across the operating budget, vendor payments,
+            and capital projects. Confidence describes source alignment, not an
+            audited accounting reconciliation.
+          </p>
+        </div>
+        <CoverageStatusBadge status="Live" />
+      </div>
+
+      <div className="comparison-controls reconciliation-controls">
+        <div className="control-field">
+          <label htmlFor="reconcile-payment-year">Payment fiscal year</label>
+          <select
+            id="reconcile-payment-year"
+            value={selectedVendorYear}
+            onChange={(event) => onSelectedVendorYearChange(event.target.value)}
+            disabled={loadingVendorYears || !vendorPaymentYears.length}
+          >
+            {vendorPaymentYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="reconcile-capital-year">Capital fiscal year</label>
+          <select
+            id="reconcile-capital-year"
+            value={selectedCapitalYear}
+            onChange={(event) => onSelectedCapitalYearChange(event.target.value)}
+            disabled={loadingCapitalYears || !capitalProjectYears.length}
+          >
+            {capitalProjectYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear} / {year.budgetStage}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field control-field-wide">
+          <label htmlFor="reconcile-search">Agency search</label>
+          <input
+            id="reconcile-search"
+            type="search"
+            placeholder="Agency name from any source"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+          />
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="reconcile-match-filter">Match type</label>
+          <select
+            id="reconcile-match-filter"
+            value={matchFilter}
+            onChange={(event) => setMatchFilter(event.target.value)}
+          >
+            <option value="all">All matches</option>
+            <option value="triangulated">Triangulated</option>
+            <option value="partial">Partial</option>
+            <option value="review">Single source</option>
+          </select>
+        </div>
+      </div>
+
+      {(vendorErrorMessage || capitalErrorMessage) && (
+        <p className="error-message">
+          {vendorErrorMessage || capitalErrorMessage}
+        </p>
+      )}
+
+      <div className="comparison-grid">
+        <MetricCard
+          label="Agencies in matcher"
+          value={formatNumber(reconciliationRows.length)}
+          detail={`${formatNumber(visibleRows.length)} visible after filters`}
+        />
+        <MetricCard
+          label="Triangulated matches"
+          value={formatNumber(triangulatedCount)}
+          detail="Visible across all three connected sources"
+        />
+        <MetricCard
+          label="Partial matches"
+          value={formatNumber(partialCount)}
+          detail="Visible across two connected sources"
+        />
+        <MetricCard
+          label="Review-only agencies"
+          value={formatNumber(reviewCount)}
+          detail="Visible in one source summary only"
+        />
+      </div>
+
+      {loadingSourceData && (
+        <section className="loading-panel reconciliation-loading" aria-live="polite">
+          <div className="spinner" />
+          <p>Loading reconciliation source summaries...</p>
+        </section>
+      )}
+
+      <section className="reconciliation-layout">
+        <div className="agency-comparison-panel reconciliation-table-panel">
+          <div className="panel-heading compact-heading">
+            <div>
+              <h3>Agency Match Table</h3>
+              <p>
+                Select an agency to inspect source labels, unmatched areas, and
+                links into each detailed explorer.
+              </p>
+            </div>
+          </div>
+
+          {visibleRows.length ? (
+            <div className="table-wrap reconciliation-table-wrap">
+              <table className="agency-comparison-table reconciliation-table">
+                <thead>
+                  <tr>
+                    <th>Agency</th>
+                    <th>Confidence</th>
+                    <th>Operating</th>
+                    <th>Payments</th>
+                    <th>Capital</th>
+                    <th>Payment scale</th>
+                    <th>Capital scale</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRows.map((row) => (
+                    <tr
+                      key={row.key}
+                      className={
+                        row.key === selectedAgency?.key ? "selected-row" : ""
+                      }
+                    >
+                      <td>
+                        <button
+                          type="button"
+                          className="reconcile-row-button"
+                          onClick={() => setSelectedAgencyKey(row.key)}
+                        >
+                          {row.name}
+                        </button>
+                      </td>
+                      <td>
+                        <ConfidenceBadge confidence={row.matchConfidence} />
+                      </td>
+                      <td>
+                        {row.operating
+                          ? formatMoney(row.operating.dollarAmount)
+                          : "No match"}
+                      </td>
+                      <td>
+                        {row.vendor
+                          ? formatMoney(row.vendor.dollarAmount)
+                          : "No match"}
+                      </td>
+                      <td>
+                        {row.capital
+                          ? formatMoney(row.capital.dollarAmount)
+                          : "No match"}
+                      </td>
+                      <td>
+                        {row.paymentScale === null
+                          ? "Not comparable"
+                          : formatPercent(row.paymentScale)}
+                      </td>
+                      <td>
+                        {row.capitalScale === null
+                          ? "Not comparable"
+                          : formatPercent(row.capitalScale)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="empty-state">No agencies match the current filters.</p>
+          )}
+        </div>
+
+        <aside className="reconciliation-detail" aria-live="polite">
+          {selectedAgency ? (
+            <>
+              <div className="coverage-detail-heading">
+                <div>
+                  <span>{selectedAgency.matchStatus}</span>
+                  <h3>{selectedAgency.name}</h3>
+                </div>
+                <ConfidenceBadge confidence={selectedAgency.matchConfidence} />
+              </div>
+
+              <div className="reconciliation-source-grid">
+                <article>
+                  <span>Operating allocation</span>
+                  <strong>
+                    {selectedAgency.operating
+                      ? formatFullMoney(selectedAgency.operating.dollarAmount)
+                      : "No match"}
+                  </strong>
+                  <small>
+                    {selectedAgency.operating
+                      ? `${formatPercent(
+                          selectedAgency.operating.percentage
+                        )} of current operating view`
+                      : "Not visible in current filters"}
+                  </small>
+                </article>
+                <article>
+                  <span>Vendor payments</span>
+                  <strong>
+                    {selectedAgency.vendor
+                      ? formatFullMoney(selectedAgency.vendor.dollarAmount)
+                      : "No match"}
+                  </strong>
+                  <small>
+                    {selectedAgency.vendor
+                      ? `${formatPercent(
+                          selectedAgency.vendor.percentage
+                        )} of payment total`
+                      : "Not visible in payment top-agency rows"}
+                  </small>
+                </article>
+                <article>
+                  <span>Capital authorizations</span>
+                  <strong>
+                    {selectedAgency.capital
+                      ? formatFullMoney(selectedAgency.capital.dollarAmount)
+                      : "No match"}
+                  </strong>
+                  <small>
+                    {selectedAgency.capital
+                      ? `${formatPercent(
+                          selectedAgency.capital.percentage
+                        )} of capital total`
+                      : "Not visible in capital rows"}
+                  </small>
+                </article>
+              </div>
+
+              <div className="reconciliation-notes">
+                <h4>Gaps And Exclusions To Check</h4>
+                <ul>
+                  {getGapItems(selectedAgency).map((item, index) => (
+                    <li key={`${item}-${index}`}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="reconciliation-notes">
+                <h4>Published Labels Matched</h4>
+                <ul>
+                  {getSourceNames(selectedAgency).map((name, index) => (
+                    <li key={`${name}-${index}`}>{name}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="reconciliation-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!selectedAgency.operating}
+                  onClick={() => onOpenOperatingAgency(selectedAgency.operating?.name)}
+                >
+                  Open operating rows
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!selectedAgency.vendor}
+                  onClick={() => onOpenVendorAgency(selectedAgency.vendor?.name)}
+                >
+                  Open payment rows
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={!selectedAgency.capital}
+                  onClick={() => onOpenCapitalAgency(selectedAgency.capital?.name)}
+                >
+                  Open capital rows
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="empty-state">Select an agency to inspect source matches.</p>
+          )}
+        </aside>
+      </section>
+
+      <footer className="panel-footnote">
+        Agency reconciliation uses normalized published labels and a small set of
+        Maryland-specific aliases. It is designed to guide review and trace
+        work, not to certify audited matches across budget, payment, and capital
+        systems.
       </footer>
     </section>
   );
@@ -2466,7 +3078,7 @@ export default function App() {
       "latest"
     );
 
-    return analysisMode === "compare" &&
+    return ["compare", "reconcile"].includes(analysisMode) &&
       ["vendor_payments", "capital_projects", "education_outcomes"].includes(
         initialQuestion
       )
@@ -2665,7 +3277,7 @@ export default function App() {
       return;
     }
 
-    if (value === "compare") {
+    if (value === "compare" || value === "reconcile") {
       setCoverageSourceId("operating-budget");
     }
 
@@ -2767,7 +3379,9 @@ export default function App() {
 
   useEffect(() => {
     const needsVendorPayments =
-      questionMode === "vendor_payments" || analysisMode === "compare";
+      questionMode === "vendor_payments" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile";
 
     if (!activeStateCode || !needsVendorPayments) return undefined;
 
@@ -2814,7 +3428,9 @@ export default function App() {
 
   useEffect(() => {
     const needsVendorPayments =
-      questionMode === "vendor_payments" || analysisMode === "compare";
+      questionMode === "vendor_payments" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile";
 
     if (
       !activeStateCode ||
@@ -2837,10 +3453,18 @@ export default function App() {
         const detail = await fetchVendorPaymentDetail(
           {
             fiscalYear: Number(selectedVendorYear),
-            searchQuery: analysisMode === "compare" ? "" : vendorSearchQuery,
-            agencyFilter: analysisMode === "compare" ? "all" : vendorAgencyFilter,
+            searchQuery:
+              ["compare", "reconcile"].includes(analysisMode)
+                ? ""
+                : vendorSearchQuery,
+            agencyFilter:
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : vendorAgencyFilter,
             categoryFilter:
-              analysisMode === "compare" ? "all" : vendorCategoryFilter,
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : vendorCategoryFilter,
           },
           controller.signal
         );
@@ -2876,7 +3500,9 @@ export default function App() {
 
   useEffect(() => {
     const needsCapitalProjects =
-      questionMode === "capital_projects" || analysisMode === "compare";
+      questionMode === "capital_projects" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile";
 
     if (!activeStateCode || !needsCapitalProjects) return undefined;
 
@@ -2923,7 +3549,9 @@ export default function App() {
 
   useEffect(() => {
     const needsCapitalProjects =
-      questionMode === "capital_projects" || analysisMode === "compare";
+      questionMode === "capital_projects" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile";
 
     if (
       !activeStateCode ||
@@ -2946,17 +3574,30 @@ export default function App() {
         const detail = await fetchCapitalProjectDetail(
           {
             fiscalYear: Number(selectedCapitalYear),
-            searchQuery: analysisMode === "compare" ? "" : capitalSearchQuery,
+            searchQuery:
+              ["compare", "reconcile"].includes(analysisMode)
+                ? ""
+                : capitalSearchQuery,
             agencyFilter:
-              analysisMode === "compare" ? "all" : capitalAgencyFilter,
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : capitalAgencyFilter,
             countyFilter:
-              analysisMode === "compare" ? "all" : capitalCountyFilter,
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : capitalCountyFilter,
             categoryFilter:
-              analysisMode === "compare" ? "all" : capitalCategoryFilter,
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : capitalCategoryFilter,
             fundTypeFilter:
-              analysisMode === "compare" ? "all" : capitalFundTypeFilter,
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : capitalFundTypeFilter,
             projectTypeFilter:
-              analysisMode === "compare" ? "all" : capitalProjectTypeFilter,
+              ["compare", "reconcile"].includes(analysisMode)
+                ? "all"
+                : capitalProjectTypeFilter,
           },
           controller.signal
         );
@@ -3004,12 +3645,17 @@ export default function App() {
     if (
       analysisMode === "coverage" ||
       analysisMode === "compare" ||
+      analysisMode === "reconcile" ||
       questionMode === "vendor_payments" ||
       questionMode === "capital_projects"
     ) {
       params.set("source", coverageSourceId);
     }
-    if (questionMode === "vendor_payments" || analysisMode === "compare") {
+    if (
+      questionMode === "vendor_payments" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile"
+    ) {
       if (selectedVendorYear) params.set("paymentYear", selectedVendorYear);
       if (questionMode === "vendor_payments" && vendorSearchQuery.trim()) {
         params.set("vendorSearch", vendorSearchQuery.trim());
@@ -3021,7 +3667,11 @@ export default function App() {
         params.set("vendorCategory", vendorCategoryFilter);
       }
     }
-    if (questionMode === "capital_projects" || analysisMode === "compare") {
+    if (
+      questionMode === "capital_projects" ||
+      analysisMode === "compare" ||
+      analysisMode === "reconcile"
+    ) {
       if (selectedCapitalYear) params.set("capitalYear", selectedCapitalYear);
       if (questionMode === "capital_projects" && capitalSearchQuery.trim()) {
         params.set("capitalSearch", capitalSearchQuery.trim());
@@ -3193,9 +3843,13 @@ export default function App() {
   const comparisonMetadata = {
     ...metadata,
     coverage:
-      "This comparison uses connected Maryland operating-budget allocations, vendor-payment summaries, and FY 2027 enacted capital-budget project/program authorizations while keeping source definitions separate.",
+      analysisMode === "reconcile"
+        ? "This reconciliation view matches connected Maryland operating-budget agencies, vendor-payment agency summaries, and FY 2027 enacted capital-budget agency/project rows using normalized published labels."
+        : "This comparison uses connected Maryland operating-budget allocations, vendor-payment summaries, and FY 2027 enacted capital-budget project/program authorizations while keeping source definitions separate.",
     confidenceReason:
-      "Official Maryland sources are connected for the operating-budget, vendor-payment, and capital-budget comparison streams.",
+      analysisMode === "reconcile"
+        ? "Official Maryland sources are connected; match confidence reflects label alignment and source coverage rather than audited accounting reconciliation."
+        : "Official Maryland sources are connected for the operating-budget, vendor-payment, and capital-budget comparison streams.",
     knownExclusions: [
       "Audited payment-to-program reconciliation keys",
       "Procurement contract identifiers matched to every payment",
@@ -3205,7 +3859,7 @@ export default function App() {
     ],
   };
   const displayMetadata =
-    analysisMode === "compare"
+    analysisMode === "compare" || analysisMode === "reconcile"
       ? comparisonMetadata
       : questionMode === "vendor_payments"
       ? vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA
@@ -3454,10 +4108,53 @@ export default function App() {
     setTraceMessage(`Trace opened for ${project.projectTitle}.`);
   }
 
+  function openOperatingAgencyRows(agencyName) {
+    if (!agencyName) return;
+
+    setQuestionMode("latest");
+    setAnalysisMode("overview");
+    setCoverageSourceId("operating-budget");
+    setSearchQuery("");
+    setAgencyFilter(agencyName);
+    setTraceMessage(`Operating rows filtered to ${agencyName}.`);
+    setTraceRow(null);
+  }
+
+  function openVendorAgencyRows(agencyName) {
+    if (!agencyName) return;
+
+    setQuestionMode("vendor_payments");
+    setAnalysisMode("payments");
+    setCoverageSourceId("vendor-payments");
+    setVendorSearchQuery("");
+    setVendorAgencyFilter(agencyName);
+    setVendorCategoryFilter("all");
+    setTraceMessage(`Vendor payment rows filtered to ${agencyName}.`);
+    setTraceRow(null);
+  }
+
+  function openCapitalAgencyRows(agencyName) {
+    if (!agencyName) return;
+
+    setQuestionMode("capital_projects");
+    setAnalysisMode("capital");
+    setCoverageSourceId("capital-budget");
+    setCapitalSearchQuery("");
+    setCapitalAgencyFilter(agencyName);
+    setCapitalCountyFilter("all");
+    setCapitalCategoryFilter("all");
+    setCapitalFundTypeFilter("all");
+    setCapitalProjectTypeFilter("all");
+    setTraceMessage(`Capital project rows filtered to ${agencyName}.`);
+    setTraceRow(null);
+  }
+
   const activeStateName = activeState?.name || "Selected state";
   const heroModeLabel =
     analysisMode === "compare"
       ? "budget comparison"
+      : analysisMode === "reconcile"
+        ? "agency reconciliation"
       : questionMode === "vendor_payments"
       ? "vendor payments"
       : questionMode === "capital_projects"
@@ -3466,6 +4163,8 @@ export default function App() {
   const heroTitle =
     analysisMode === "compare"
       ? `${activeStateName} Budget Comparison`
+      : analysisMode === "reconcile"
+        ? `${activeStateName} Agency Reconciliation`
       : questionMode === "vendor_payments"
       ? `${activeStateName} Vendor Payments`
       : questionMode === "capital_projects"
@@ -3474,6 +4173,8 @@ export default function App() {
   const heroDescription =
     analysisMode === "compare"
       ? "Compare operating-budget allocations, official vendor-payment records, and enacted capital-budget authorizations while keeping each source's definition visible."
+      : analysisMode === "reconcile"
+        ? "Match agency labels across operating-budget allocations, vendor-payment records, and capital-project authorizations with confidence flags and source-specific drill-ins."
       : questionMode === "vendor_payments"
       ? "Explore official vendor-payment records beside operating-budget context without mixing transaction data into budget allocations."
       : questionMode === "capital_projects"
@@ -3793,7 +4494,9 @@ export default function App() {
             budgetStage={
               analysisMode === "compare"
                 ? "Cross-source comparison"
-                : questionMode === "vendor_payments"
+                : analysisMode === "reconcile"
+                  ? "Agency reconciliation"
+                  : questionMode === "vendor_payments"
                 ? "Vendor payments"
                 : questionMode === "capital_projects"
                   ? "Capital projects"
@@ -3804,7 +4507,9 @@ export default function App() {
           <section
             className="metrics-grid"
             aria-label={
-              questionMode === "vendor_payments"
+              analysisMode === "reconcile"
+                ? "Budget agency reconciliation summary"
+                : questionMode === "vendor_payments"
                 ? "Budget and vendor payment summary"
                 : questionMode === "capital_projects"
                   ? "Budget and capital project summary"
@@ -3924,6 +4629,30 @@ export default function App() {
               loadingCapitalYears={loadingCapitalYears}
               loadingCapitalProjects={loadingCapitalProjects}
               capitalErrorMessage={capitalErrorMessage}
+            />
+          )}
+
+          {analysisMode === "reconcile" && (
+            <ReconciliationPanel
+              budgetDetail={budgetDetail}
+              filteredRows={filteredRows}
+              vendorPaymentYears={vendorPaymentYears}
+              selectedVendorYear={selectedVendorYear}
+              onSelectedVendorYearChange={setSelectedVendorYear}
+              vendorPaymentDetail={vendorPaymentDetail}
+              loadingVendorYears={loadingVendorYears}
+              loadingVendorPayments={loadingVendorPayments}
+              vendorErrorMessage={vendorErrorMessage}
+              capitalProjectYears={capitalProjectYears}
+              selectedCapitalYear={selectedCapitalYear}
+              onSelectedCapitalYearChange={setSelectedCapitalYear}
+              capitalProjectDetail={capitalProjectDetail}
+              loadingCapitalYears={loadingCapitalYears}
+              loadingCapitalProjects={loadingCapitalProjects}
+              capitalErrorMessage={capitalErrorMessage}
+              onOpenOperatingAgency={openOperatingAgencyRows}
+              onOpenVendorAgency={openVendorAgencyRows}
+              onOpenCapitalAgency={openCapitalAgencyRows}
             />
           )}
 

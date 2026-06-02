@@ -1103,6 +1103,132 @@ button:focus {
   min-width: 760px;
 }
 
+.reconciliation-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.reconciliation-panel > .panel-heading {
+  margin-bottom: 0;
+}
+
+.reconciliation-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.reconciliation-table-panel,
+.reconciliation-detail {
+  min-width: 0;
+}
+
+.reconciliation-table-wrap {
+  max-height: 560px;
+}
+
+.reconciliation-table {
+  min-width: 980px;
+}
+
+.reconciliation-table .selected-row {
+  background: #ecfdf5;
+}
+
+.reconcile-row-button {
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #0f766e;
+  text-align: left;
+  font: inherit;
+  font-weight: 800;
+}
+
+.reconcile-row-button:focus {
+  outline-offset: 3px;
+}
+
+.reconciliation-detail {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid #d9dee5;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.reconciliation-detail h3 {
+  margin: 3px 0 0;
+  color: #111827;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.reconciliation-source-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.reconciliation-source-grid article {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.reconciliation-source-grid span,
+.reconciliation-notes h4 {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.reconciliation-source-grid strong {
+  color: #111827;
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.reconciliation-source-grid small {
+  color: #4b5563;
+  line-height: 1.4;
+}
+
+.reconciliation-notes {
+  display: grid;
+  gap: 8px;
+}
+
+.reconciliation-notes ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #4b5563;
+  line-height: 1.45;
+}
+
+.reconciliation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.reconciliation-actions button {
+  width: auto;
+}
+
+.reconciliation-loading {
+  margin: 0;
+}
+
 .vendor-source-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
@@ -1382,7 +1508,8 @@ td:nth-child(10) {
   .coverage-step-list,
   .source-buildout-grid,
   .source-compare-grid,
-  .comparison-rule-grid {
+  .comparison-rule-grid,
+  .reconciliation-layout {
     grid-template-columns: 1fr;
   }
 
