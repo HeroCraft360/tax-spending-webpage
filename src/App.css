@@ -637,7 +637,9 @@ button:focus {
 .efficiency-panel,
 .explainer-panel,
 .trend-panel,
-.comparison-panel {
+.comparison-panel,
+.vendor-payment-section,
+.vendor-overview-panel {
   margin-bottom: 20px;
 }
 
@@ -981,6 +983,61 @@ button:focus {
 .benchmark-grid strong {
   color: #111827;
   font-size: 22px;
+}
+
+.vendor-source-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.vendor-source-strip > div {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #d9dee5;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.vendor-source-strip span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.vendor-source-strip strong,
+.vendor-source-strip a {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vendor-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
+.vendor-loading-panel {
+  margin: 16px 0 0;
+}
+
+.vendor-dashboard-grid {
+  margin-bottom: 20px;
+}
+
+.vendor-nested-panel h3,
+.vendor-table-panel h3 {
+  margin: 0;
+  color: #111827;
+  font-size: 20px;
+  line-height: 1.25;
 }
 
 .panel-footnote {

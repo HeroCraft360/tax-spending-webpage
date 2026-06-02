@@ -9,6 +9,13 @@ import {
   SOURCE_URL,
 } from "./data/marylandBudget";
 import {
+  DEFAULT_VENDOR_PAYMENT_METADATA,
+  fetchVendorPaymentDetail,
+  fetchVendorPaymentYears,
+  VENDOR_PAYMENTS_LAST_UPDATED,
+  VENDOR_PAYMENTS_METADATA_UPDATED,
+} from "./data/marylandVendorPayments";
+import {
   BUDGET_COVERAGE_SOURCES,
   CAPITAL_PROJECT_PIPELINE,
   COVERAGE_IMPLEMENTATION_STEPS,
@@ -41,6 +48,10 @@ const ANALYSIS_MODES = [
   {
     value: "compare",
     label: "Compare",
+  },
+  {
+    value: "payments",
+    label: "Vendor Payments",
   },
   {
     value: "accountability",
@@ -185,7 +196,7 @@ function getInitialAnalysisMode() {
 
   const requestedQuestion = getQueryValue("question");
 
-  if (requestedQuestion === "vendor_payments") return "coverage";
+  if (requestedQuestion === "vendor_payments") return "payments";
   if (requestedQuestion === "education_outcomes") return "accountability";
 
   return "overview";
@@ -264,7 +275,7 @@ function getQuestionNotice(questionMode, selectedYearLabel) {
   }
 
   if (questionMode === "vendor_payments") {
-    return "Vendor payments use a separate official source. The coverage map shows availability, exclusions, and adapter status.";
+    return "Vendor payments use the official Maryland payments dataset. These are payment records, not operating-budget allocations, and current-year values may be partial.";
   }
 
   if (questionMode === "education_outcomes") {
@@ -414,10 +425,33 @@ function getEducationSpendContext(budgetDetail) {
 function buildTraceText(row, budgetDetail) {
   if (!row) return "";
 
-  const totalAmount = budgetDetail?.totalAmount || 0;
+  const totalAmount = row.traceTotalAmount ?? budgetDetail?.totalAmount ?? 0;
   const share = totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0;
+  const totalLabel = row.traceTotalLabel || "selected-year total";
 
-  return `${row.sourceLabel}: FY ${row.fiscalYear}, ${row.budgetStage}, ${row.agencyName} / ${row.unitName} / ${row.programName} / ${row.subprogramName}. ${row.fundType}: ${formatFullMoney(row.dollarAmount)} divided by ${formatFullMoney(totalAmount)} selected-year total = ${formatPercent(share)}. Confidence: ${row.confidence}.`;
+  return `${row.sourceLabel}: FY ${row.fiscalYear}, ${row.budgetStage}, ${row.agencyName} / ${row.unitName} / ${row.programName} / ${row.subprogramName}. ${row.fundType}: ${formatFullMoney(row.dollarAmount)} divided by ${formatFullMoney(totalAmount)} ${totalLabel} = ${formatPercent(share)}. Confidence: ${row.confidence}.`;
+}
+
+function buildVendorTraceRow(payment, vendorPaymentDetail) {
+  return {
+    fiscalYear: payment.fiscalYear,
+    agencyName: payment.agencyName,
+    unitName: payment.category,
+    programName: payment.vendorName,
+    subprogramName: `${formatNumber(payment.paymentCount)} payment rows`,
+    categoryTitle: payment.category,
+    fundType: payment.vendorZip,
+    budgetStage: "Vendor payment summary",
+    sourceLabel: payment.sourceLabel,
+    sourceUrl: payment.sourceUrl,
+    confidence: payment.confidence,
+    notes: payment.notes,
+    dollarAmount: payment.dollarAmount,
+    percentage: payment.percentage,
+    traceType: "Vendor payment",
+    traceTotalAmount: vendorPaymentDetail?.totalAmount || 0,
+    traceTotalLabel: `FY ${payment.fiscalYear} vendor-payment total`,
+  };
 }
 
 function getActiveFilterSummary(filters) {
@@ -1003,7 +1037,7 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
           </a>
           {selectedSource.secondaryUrl && (
             <a href={selectedSource.secondaryUrl} target="_blank" rel="noreferrer">
-              Department of Legislative Services capital resources
+              {selectedSource.secondaryLabel || "Secondary source"}
             </a>
           )}
           <ul>
@@ -1139,12 +1173,357 @@ function BudgetBars({ rows }) {
   );
 }
 
+function PaymentBars({ rows }) {
+  const maxAmount = rows[0]?.dollarAmount || 0;
+
+  if (!rows.length) {
+    return <p className="empty-state">No vendor payments match the current filters.</p>;
+  }
+
+  return (
+    <div className="bar-list">
+      {rows.map((row, index) => {
+        const width = maxAmount > 0 ? (row.dollarAmount / maxAmount) * 100 : 0;
+
+        return (
+          <div
+            className="bar-row"
+            key={`${row.fiscalYear}-${row.agencyName}-${row.vendorName}-${row.category}-${row.vendorZip}-${index}`}
+          >
+            <div className="bar-row-top">
+              <span>{row.vendorName}</span>
+              <strong>{formatMoney(row.dollarAmount)}</strong>
+            </div>
+            <div className="bar-track" aria-hidden="true">
+              <div
+                className="bar-fill"
+                style={{
+                  "--bar-width": `${width}%`,
+                  "--bar-color": BAR_COLORS[index % BAR_COLORS.length],
+                }}
+              />
+            </div>
+            <div className="bar-row-meta">
+              <span>{row.agencyName}</span>
+              <span>
+                {row.category} / {row.vendorZip} /{" "}
+                {formatNumber(row.paymentCount)} rows /{" "}
+                {formatPercent(row.percentage)}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function VendorPaymentsPanel({
+  vendorPaymentYears,
+  selectedVendorYear,
+  onSelectedVendorYearChange,
+  vendorSearchQuery,
+  onVendorSearchQueryChange,
+  vendorAgencyFilter,
+  onVendorAgencyFilterChange,
+  vendorCategoryFilter,
+  onVendorCategoryFilterChange,
+  vendorPaymentDetail,
+  loading,
+  errorMessage,
+  onTracePayment,
+  onExportPayments,
+  onCopyCitation,
+  onCopyViewLink,
+}) {
+  const metadata = vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA;
+  const payments = vendorPaymentDetail?.payments || [];
+  const topPaymentRows = payments.slice(0, 10);
+  const topVendor = vendorPaymentDetail?.topVendors?.[0];
+  const agencyOptions = vendorPaymentDetail?.topAgencies || [];
+  const categoryOptions = vendorPaymentDetail?.categories || [];
+
+  return (
+    <section className="vendor-payment-section">
+      <section className="panel vendor-overview-panel">
+        <div className="panel-heading">
+        <div>
+          <h2>Vendor Payment Explorer</h2>
+          <p>
+            Search official Maryland payment summaries by vendor, agency,
+            category/code, and fiscal year. These are payment records, not budget
+            allocations.
+          </p>
+        </div>
+        <CoverageStatusBadge status="Live" />
+      </div>
+
+      <div className="vendor-source-strip">
+        <div>
+          <span>Official source</span>
+          <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">
+            {metadata.sourceLabel}
+          </a>
+        </div>
+        <div>
+          <span>Updated</span>
+          <strong>{metadata.dataLastUpdated}</strong>
+        </div>
+        <div>
+          <span>Frequency</span>
+          <strong>{metadata.updateFrequency}</strong>
+        </div>
+        <div>
+          <span>Portal</span>
+          <a href={metadata.transparencyPortalUrl} target="_blank" rel="noreferrer">
+            Vendor payments
+          </a>
+        </div>
+      </div>
+
+      <div className="vendor-controls" aria-label="Vendor payment controls">
+        <div className="control-field">
+          <label htmlFor="vendor-year-select">Payment fiscal year</label>
+          <select
+            id="vendor-year-select"
+            value={selectedVendorYear}
+            onChange={(event) => onSelectedVendorYearChange(event.target.value)}
+            disabled={loading || !vendorPaymentYears.length}
+          >
+            {vendorPaymentYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field control-field-wide">
+          <label htmlFor="vendor-search-input">Vendor search</label>
+          <input
+            id="vendor-search-input"
+            type="search"
+            placeholder="Vendor, agency, or category/code"
+            value={vendorSearchQuery}
+            onChange={(event) => onVendorSearchQueryChange(event.target.value)}
+            disabled={loading || !selectedVendorYear}
+          />
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="vendor-agency-filter">Payment agency</label>
+          <select
+            id="vendor-agency-filter"
+            value={vendorAgencyFilter}
+            onChange={(event) => onVendorAgencyFilterChange(event.target.value)}
+            disabled={loading || !vendorPaymentDetail}
+          >
+            <option value="all">All agencies</option>
+            {agencyOptions.map((agency) => (
+              <option key={agency.name} value={agency.name}>
+                {agency.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="control-field">
+          <label htmlFor="vendor-category-filter">Payment category/code</label>
+          <select
+            id="vendor-category-filter"
+            value={vendorCategoryFilter}
+            onChange={(event) => onVendorCategoryFilterChange(event.target.value)}
+            disabled={loading || !vendorPaymentDetail}
+          >
+            <option value="all">All categories</option>
+            {categoryOptions.map((category) => (
+              <option key={category.name} value={category.name}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {loading && (
+        <section className="loading-panel vendor-loading-panel" aria-live="polite">
+          <div className="spinner" />
+          <p>Loading FY {selectedVendorYear || ""} vendor payments...</p>
+        </section>
+      )}
+
+      {errorMessage && <p className="error-message">{errorMessage}</p>}
+      </section>
+
+      {vendorPaymentDetail && !loading && (
+        <>
+          <div className="comparison-grid">
+            <MetricCard
+              label={`FY ${vendorPaymentDetail.fiscalYear} payment total`}
+              value={formatMoney(vendorPaymentDetail.totalAmount)}
+              detail={formatFullMoney(vendorPaymentDetail.totalAmount)}
+            />
+            <MetricCard
+              label="Payment rows in source"
+              value={formatNumber(vendorPaymentDetail.rowCount)}
+              detail="Rows after payment filters"
+            />
+            <MetricCard
+              label="Grouped payments returned"
+              value={formatNumber(payments.length)}
+              detail={`Top grouped vendor rows, capped at ${formatNumber(
+                vendorPaymentDetail.paymentLimit
+              )}`}
+            />
+            <MetricCard
+              label="Top vendor in view"
+              value={topVendor ? formatMoney(topVendor.dollarAmount) : "$0"}
+              detail={topVendor?.name || "No vendor rows returned"}
+            />
+          </div>
+
+          <section className="dashboard-grid vendor-dashboard-grid">
+            <section className="panel panel-large vendor-nested-panel">
+              <div className="panel-heading">
+                <div>
+                  <h3>Largest Vendor Payments</h3>
+                  <p>
+                    Grouped by agency, vendor, category/code, and ZIP after active
+                    payment filters.
+                  </p>
+                </div>
+                <span>{formatNumber(payments.length)} rows</span>
+              </div>
+
+              <PaymentBars rows={topPaymentRows} />
+            </section>
+
+            <div className="side-stack">
+              <MiniBreakdown
+                title="Top Vendors In View"
+                rows={vendorPaymentDetail.topVendors}
+              />
+              <MiniBreakdown
+                title="Payment Categories/Codes"
+                rows={vendorPaymentDetail.categories.slice(0, 12)}
+              />
+            </div>
+          </section>
+
+          <section className="table-panel vendor-table-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>Vendor Payment Detail</h3>
+                <p>
+                  Showing {formatNumber(payments.length)} grouped rows from FY{" "}
+                  {vendorPaymentDetail.fiscalYear}.
+                  {vendorPaymentDetail.isPaymentCapped
+                    ? ` The table returns the top ${formatNumber(
+                        vendorPaymentDetail.paymentLimit
+                      )} grouped payment rows.`
+                    : ""}
+                </p>
+              </div>
+              <span>{formatMoney(vendorPaymentDetail.totalAmount)}</span>
+            </div>
+
+            <div className="table-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onExportPayments}
+                disabled={!payments.length}
+              >
+                Export payment CSV
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyCitation}
+              >
+                Copy payment source
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyViewLink}
+              >
+                Copy view link
+              </button>
+            </div>
+
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fiscal Year</th>
+                    <th>Agency</th>
+                    <th>Vendor</th>
+                    <th>Category/Code</th>
+                    <th>Vendor ZIP</th>
+                    <th>Amount</th>
+                    <th>Share</th>
+                    <th>Payment Rows</th>
+                    <th>Confidence</th>
+                    <th>Trace</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payments.map((payment, index) => (
+                    <tr
+                      key={`${payment.fiscalYear}-${payment.agencyName}-${payment.vendorName}-${payment.category}-${payment.vendorZip}-${index}`}
+                    >
+                      <td>FY {payment.fiscalYear}</td>
+                      <td>{payment.agencyName}</td>
+                      <td>{payment.vendorName}</td>
+                      <td>{payment.category}</td>
+                      <td>{payment.vendorZip}</td>
+                      <td>{formatFullMoney(payment.dollarAmount)}</td>
+                      <td>{formatPercent(payment.percentage)}</td>
+                      <td>{formatNumber(payment.paymentCount)}</td>
+                      <td>
+                        <ConfidenceBadge confidence={payment.confidence} />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="trace-button"
+                          onClick={() => onTracePayment(payment)}
+                        >
+                          Trace
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <footer className="panel-footnote">
+            {metadata.limitations.join(" ")}
+            {vendorPaymentDetail.isPaymentCapped
+              ? ` The grouped vendor table is capped at ${formatNumber(
+                  vendorPaymentDetail.paymentLimit
+                )} rows; the all-row payment total exceeds returned grouped rows by ${formatFullMoney(
+                  vendorPaymentDetail.paymentDifference
+                )}.`
+              : ""}
+          </footer>
+        </>
+      )}
+    </section>
+  );
+}
+
 function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
   if (!row) return null;
 
-  const totalAmount = budgetDetail?.totalAmount || 0;
+  const totalAmount = row.traceTotalAmount ?? budgetDetail?.totalAmount ?? 0;
   const share = totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0;
   const activeFilters = getActiveFilterSummary(filters);
+  const isVendorTrace = row.traceType === "Vendor payment";
+  const totalLabel = row.traceTotalLabel || "selected-year operating budget total";
 
   return (
     <div className="trace-drawer-backdrop" role="presentation">
@@ -1156,7 +1535,7 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
       >
         <div className="trace-drawer-heading">
           <div>
-            <span>Allocation trace</span>
+            <span>{isVendorTrace ? "Vendor payment trace" : "Allocation trace"}</span>
             <h2>{row.programName}</h2>
           </div>
           <button type="button" className="trace-close-button" onClick={onClose}>
@@ -1168,8 +1547,8 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
           <span>Calculation</span>
           <strong>{formatFullMoney(row.dollarAmount)}</strong>
           <p>
-            Divided by {formatFullMoney(totalAmount)} selected-year operating
-            budget total equals {formatPercent(share)}.
+            Divided by {formatFullMoney(totalAmount)} {totalLabel} equals{" "}
+            {formatPercent(share)}.
           </p>
         </div>
 
@@ -1187,15 +1566,15 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
             <strong>{row.agencyName}</strong>
           </div>
           <div>
-            <span>Department</span>
+            <span>{isVendorTrace ? "Payment category/code" : "Department"}</span>
             <strong>{row.unitName}</strong>
           </div>
           <div>
-            <span>Category</span>
+            <span>{isVendorTrace ? "Category/code" : "Category"}</span>
             <strong>{row.categoryTitle}</strong>
           </div>
           <div>
-            <span>Fund type</span>
+            <span>{isVendorTrace ? "Vendor ZIP" : "Fund type"}</span>
             <strong>{row.fundType}</strong>
           </div>
         </div>
@@ -1232,6 +1611,7 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
 
 export default function App() {
   const [initialYearRequest] = useState(() => getQueryValue("year"));
+  const [initialVendorYearRequest] = useState(() => getQueryValue("paymentYear"));
   const [hasInitialFilterParams] = useState(
     () =>
       Boolean(getQueryValue("search")) ||
@@ -1251,6 +1631,9 @@ export default function App() {
   const [budgetYears, setBudgetYears] = useState([]);
   const [selectedYear, setSelectedYear] = useState("");
   const [budgetDetail, setBudgetDetail] = useState(null);
+  const [vendorPaymentYears, setVendorPaymentYears] = useState([]);
+  const [selectedVendorYear, setSelectedVendorYear] = useState("");
+  const [vendorPaymentDetail, setVendorPaymentDetail] = useState(null);
   const [analysisMode, setAnalysisMode] = useState(getInitialAnalysisMode);
   const [questionMode, setQuestionMode] = useState(() =>
     getQueryOption(
@@ -1264,7 +1647,10 @@ export default function App() {
   );
   const [loadingYears, setLoadingYears] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [loadingVendorYears, setLoadingVendorYears] = useState(false);
+  const [loadingVendorPayments, setLoadingVendorPayments] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [vendorErrorMessage, setVendorErrorMessage] = useState("");
   const [traceMessage, setTraceMessage] = useState("");
   const [traceRow, setTraceRow] = useState(null);
   const [searchQuery, setSearchQuery] = useState(() => getQueryValue("search"));
@@ -1286,6 +1672,15 @@ export default function App() {
   const [rowLimit, setRowLimit] = useState(() =>
     getQueryOption("rows", ROW_LIMITS, "100")
   );
+  const [vendorSearchQuery, setVendorSearchQuery] = useState(() =>
+    getQueryValue("vendorSearch")
+  );
+  const [vendorAgencyFilter, setVendorAgencyFilter] = useState(
+    () => getQueryValue("vendorAgency") || "all"
+  );
+  const [vendorCategoryFilter, setVendorCategoryFilter] = useState(
+    () => getQueryValue("vendorCategory") || "all"
+  );
   const selectedState = STATE_BY_CODE[selectedStateCode];
   const activeState = STATE_BY_CODE[activeStateCode];
   const canOpenSelectedState = Boolean(selectedState?.isConnected);
@@ -1301,6 +1696,9 @@ export default function App() {
     setCoverageSourceId("operating-budget");
     setSortMode("amount");
     setRowLimit("100");
+    setVendorSearchQuery("");
+    setVendorAgencyFilter("all");
+    setVendorCategoryFilter("all");
     setTraceMessage("");
     setTraceRow(null);
   }
@@ -1309,12 +1707,18 @@ export default function App() {
     setBudgetYears([]);
     setSelectedYear("");
     setBudgetDetail(null);
+    setVendorPaymentYears([]);
+    setSelectedVendorYear("");
+    setVendorPaymentDetail(null);
     setSourceMetadata(DEFAULT_SOURCE_METADATA);
     setErrorMessage("");
+    setVendorErrorMessage("");
     setTraceMessage("");
     setTraceRow(null);
     setLoadingYears(false);
     setLoadingDetail(false);
+    setLoadingVendorYears(false);
+    setLoadingVendorPayments(false);
     resetFilters();
   }
 
@@ -1337,9 +1741,13 @@ export default function App() {
     if (value === "education_outcomes") {
       setAnalysisMode("accountability");
     } else if (value === "vendor_payments") {
-      setAnalysisMode("coverage");
+      setAnalysisMode("payments");
       setCoverageSourceId("vendor-payments");
-    } else if (analysisMode === "accountability" || analysisMode === "coverage") {
+    } else if (
+      analysisMode === "accountability" ||
+      analysisMode === "coverage" ||
+      analysisMode === "payments"
+    ) {
       setAnalysisMode("overview");
     }
 
@@ -1363,6 +1771,14 @@ export default function App() {
       if (questionMode === "education_outcomes") {
         setQuestionMode("latest");
       }
+      return;
+    }
+
+    if (value === "payments") {
+      if (questionMode !== "vendor_payments") {
+        setQuestionMode("vendor_payments");
+      }
+      setCoverageSourceId("vendor-payments");
       return;
     }
 
@@ -1466,6 +1882,101 @@ export default function App() {
   }, [activeStateCode, hasInitialFilterParams, selectedYear]);
 
   useEffect(() => {
+    if (!activeStateCode || questionMode !== "vendor_payments") return undefined;
+
+    const controller = new AbortController();
+
+    async function loadVendorYears() {
+      setLoadingVendorYears(true);
+      setVendorErrorMessage("");
+
+      try {
+        const payload = await fetchVendorPaymentYears(controller.signal);
+        const years = payload.years;
+
+        if (!years.length) {
+          throw new Error("No Maryland vendor-payment years were returned.");
+        }
+
+        setVendorPaymentYears(years);
+        const requestedYear = years.find(
+          (year) =>
+            String(year.fiscalYear) === String(initialVendorYearRequest) ||
+            String(year.fiscalYear) === String(selectedYear)
+        );
+        setSelectedVendorYear(String((requestedYear || years[0]).fiscalYear));
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setVendorErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingVendorYears(false);
+      }
+    }
+
+    loadVendorYears();
+
+    return () => controller.abort();
+  }, [activeStateCode, initialVendorYearRequest, questionMode, selectedYear]);
+
+  useEffect(() => {
+    if (
+      !activeStateCode ||
+      questionMode !== "vendor_payments" ||
+      !selectedVendorYear
+    ) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+
+    async function loadVendorPayments() {
+      setVendorPaymentDetail(null);
+      setLoadingVendorPayments(true);
+      setVendorErrorMessage("");
+      setTraceMessage("");
+      setTraceRow(null);
+
+      try {
+        const detail = await fetchVendorPaymentDetail(
+          {
+            fiscalYear: Number(selectedVendorYear),
+            searchQuery: vendorSearchQuery,
+            agencyFilter: vendorAgencyFilter,
+            categoryFilter: vendorCategoryFilter,
+          },
+          controller.signal
+        );
+
+        if (!detail) {
+          throw new Error(
+            `No vendor-payment detail was returned for FY ${selectedVendorYear}.`
+          );
+        }
+
+        setVendorPaymentDetail(detail);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setVendorErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingVendorPayments(false);
+      }
+    }
+
+    loadVendorPayments();
+
+    return () => controller.abort();
+  }, [
+    activeStateCode,
+    questionMode,
+    selectedVendorYear,
+    vendorAgencyFilter,
+    vendorCategoryFilter,
+    vendorSearchQuery,
+  ]);
+
+  useEffect(() => {
     if (!activeStateCode || typeof window === "undefined") return;
 
     const params = new URLSearchParams();
@@ -1475,6 +1986,18 @@ export default function App() {
     params.set("question", questionMode);
     if (analysisMode === "coverage" || questionMode === "vendor_payments") {
       params.set("source", coverageSourceId);
+    }
+    if (questionMode === "vendor_payments") {
+      if (selectedVendorYear) params.set("paymentYear", selectedVendorYear);
+      if (vendorSearchQuery.trim()) {
+        params.set("vendorSearch", vendorSearchQuery.trim());
+      }
+      if (vendorAgencyFilter !== "all") {
+        params.set("vendorAgency", vendorAgencyFilter);
+      }
+      if (vendorCategoryFilter !== "all") {
+        params.set("vendorCategory", vendorCategoryFilter);
+      }
     }
     if (searchQuery.trim()) params.set("search", searchQuery.trim());
     if (agencyFilter !== "all") params.set("agency", agencyFilter);
@@ -1504,6 +2027,10 @@ export default function App() {
     searchQuery,
     selectedYear,
     sortMode,
+    selectedVendorYear,
+    vendorAgencyFilter,
+    vendorCategoryFilter,
+    vendorSearchQuery,
   ]);
 
   const agencyOptions = useMemo(() => {
@@ -1607,10 +2134,21 @@ export default function App() {
   );
   const selectedYearLabel = selectedYear ? `FY ${selectedYear}` : "Loading";
   const metadata = budgetDetail?.metadata || sourceMetadata || DEFAULT_SOURCE_METADATA;
+  const displayMetadata =
+    questionMode === "vendor_payments"
+      ? vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA
+      : metadata;
+  const displaySourceLastUpdated =
+    questionMode === "vendor_payments"
+      ? displayMetadata.dataLastUpdated || VENDOR_PAYMENTS_LAST_UPDATED
+      : SOURCE_LAST_MODIFIED;
+  const displayMetadataUpdated =
+    questionMode === "vendor_payments"
+      ? displayMetadata.metadataUpdated || VENDOR_PAYMENTS_METADATA_UPDATED
+      : SOURCE_METADATA_UPDATED;
   const activeQuestion =
     QUESTION_OPTIONS.find((option) => option.value === questionMode) ||
     QUESTION_OPTIONS[0];
-  const isUnsupportedQuestion = questionMode === "vendor_payments";
   const hidesAllocationTable =
     questionMode === "vendor_payments" || questionMode === "education_outcomes";
   const showsAllocationViews =
@@ -1623,7 +2161,10 @@ export default function App() {
     categoryFilter !== "all" ||
     questionMode !== "latest" ||
     sortMode !== "amount" ||
-    rowLimit !== "100";
+    rowLimit !== "100" ||
+    vendorSearchQuery.trim() ||
+    vendorAgencyFilter !== "all" ||
+    vendorCategoryFilter !== "all";
 
   function exportFilteredCsv() {
     if (!displayedRows.length) return;
@@ -1676,6 +2217,55 @@ export default function App() {
     setTraceMessage(`Exported ${displayedRows.length} visible rows as CSV.`);
   }
 
+  function exportVendorPaymentCsv() {
+    const payments = vendorPaymentDetail?.payments || [];
+
+    if (!payments.length) return;
+
+    const headers = [
+      "Fiscal Year",
+      "Agency",
+      "Vendor",
+      "Category/Code",
+      "Vendor ZIP",
+      "Amount",
+      "% Vendor Payment Total",
+      "Payment Rows",
+      "Source",
+      "Confidence",
+      "Notes",
+    ];
+    const lines = [
+      headers.map(csvEscape).join(","),
+      ...payments.map((payment) =>
+        [
+          payment.fiscalYear,
+          payment.agencyName,
+          payment.vendorName,
+          payment.category,
+          payment.vendorZip,
+          payment.dollarAmount,
+          payment.percentage.toFixed(4),
+          payment.paymentCount,
+          payment.sourceLabel,
+          payment.confidence,
+          payment.notes,
+        ]
+          .map(csvEscape)
+          .join(",")
+      ),
+    ];
+    const csv = lines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `maryland-vendor-payments-fy-${selectedVendorYear}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setTraceMessage(`Exported ${payments.length} grouped vendor-payment rows as CSV.`);
+  }
+
   async function copyViewLink() {
     if (typeof window === "undefined") return;
 
@@ -1688,7 +2278,7 @@ export default function App() {
   }
 
   async function copySourceCitation() {
-    const citation = `${metadata.sourceLabel}. Maryland Open Data. ${metadata.sourceUrl}. Data last modified ${SOURCE_LAST_MODIFIED}; metadata updated ${SOURCE_METADATA_UPDATED}.`;
+    const citation = `${displayMetadata.sourceLabel}. Maryland Open Data. ${displayMetadata.sourceUrl}. Data last modified ${displaySourceLastUpdated}; metadata updated ${displayMetadataUpdated}.`;
 
     try {
       await navigator.clipboard.writeText(citation);
@@ -1707,6 +2297,11 @@ export default function App() {
     } catch {
       setTraceMessage(trace);
     }
+  }
+
+  function handleVendorTrace(payment) {
+    setTraceRow(buildVendorTraceRow(payment, vendorPaymentDetail));
+    setTraceMessage(`Trace opened for ${payment.vendorName}.`);
   }
 
   if (!activeState) {
@@ -1785,14 +2380,24 @@ export default function App() {
           <span>Selected state</span>
           <strong>{activeState.name}</strong>
           <span>Official source</span>
-          <a href={metadata.sourceUrl || SOURCE_URL} target="_blank" rel="noreferrer">
-            {metadata.sourceLabel || SOURCE_LABEL}
+          <a
+            href={displayMetadata.sourceUrl || SOURCE_URL}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {displayMetadata.sourceLabel || SOURCE_LABEL}
           </a>
           <span>Confidence</span>
-          <ConfidenceBadge confidence={metadata.confidence} />
-          <small>Data last modified {SOURCE_LAST_MODIFIED}</small>
-          <small>Metadata updated {SOURCE_METADATA_UPDATED}</small>
-          {budgetDetail?.budgetStage && (
+          <ConfidenceBadge confidence={displayMetadata.confidence} />
+          <small>Data last modified {displaySourceLastUpdated}</small>
+          <small>Metadata updated {displayMetadataUpdated}</small>
+          {questionMode === "vendor_payments" && selectedVendorYear && (
+            <>
+              <span>Payment fiscal year</span>
+              <StageBadge stage={`FY ${selectedVendorYear}`} />
+            </>
+          )}
+          {questionMode !== "vendor_payments" && budgetDetail?.budgetStage && (
             <>
               <span>Budget stage</span>
               <StageBadge stage={budgetDetail.budgetStage} />
@@ -1982,13 +2587,15 @@ export default function App() {
         selectedYearLabel={selectedYearLabel}
       />
 
-      {(loadingYears || loadingDetail) && (
+      {(loadingYears || loadingDetail || loadingVendorYears) && (
         <section className="loading-panel" aria-live="polite">
           <div className="spinner" />
           <p>
             {loadingYears
               ? "Loading fiscal years..."
-              : `Loading FY ${selectedYear} allocations...`}
+              : loadingVendorYears
+                ? "Loading vendor-payment fiscal years..."
+                : `Loading FY ${selectedYear} allocations...`}
           </p>
         </section>
       )}
@@ -1998,43 +2605,78 @@ export default function App() {
       {budgetDetail && !loadingDetail && (
         <>
           <DataCoveragePanels
-            metadata={metadata}
-            budgetStage={budgetDetail.budgetStage}
+            metadata={displayMetadata}
+            budgetStage={
+              questionMode === "vendor_payments"
+                ? "Vendor payments"
+                : budgetDetail.budgetStage
+            }
           />
 
-          <section className="metrics-grid" aria-label="Budget summary">
+          <section
+            className="metrics-grid"
+            aria-label={
+              questionMode === "vendor_payments"
+                ? "Budget and vendor payment summary"
+                : "Budget summary"
+            }
+          >
             <MetricCard
-              label={`FY ${budgetDetail.fiscalYear} positive budget total`}
+              label={
+                questionMode === "vendor_payments"
+                  ? `FY ${budgetDetail.fiscalYear} operating-budget total`
+                  : `FY ${budgetDetail.fiscalYear} positive budget total`
+              }
               value={formatMoney(budgetDetail.totalAmount)}
               detail={formatFullMoney(budgetDetail.totalAmount)}
             />
             <MetricCard
-              label="Source line items"
+              label={
+                questionMode === "vendor_payments"
+                  ? "Operating-budget line items"
+                  : "Source line items"
+              }
               value={formatNumber(budgetDetail.rowCount)}
               detail="Rows with budget values above zero"
             />
             <MetricCard
-              label="Grouped allocations returned"
+              label={
+                questionMode === "vendor_payments"
+                  ? "Grouped budget allocations returned"
+                  : "Grouped allocations returned"
+              }
               value={formatNumber(budgetDetail.allocations.length)}
               detail={`Top grouped rows by amount, capped at ${formatNumber(
                 budgetDetail.allocationLimit
               )}`}
             />
             <MetricCard
-              label="Budget stage"
+              label={
+                questionMode === "vendor_payments"
+                  ? "Operating-budget stage"
+                  : "Budget stage"
+              }
               value={budgetDetail.budgetStage}
               detail="Normalized from the source type field"
             />
             <MetricCard
               label={
                 questionMode === "vendor_payments"
-                  ? "Operating-budget match total"
+                  ? `FY ${selectedVendorYear || "selected"} vendor-payment total`
                   : "Current filter total"
               }
-              value={formatMoney(filteredTotal)}
+              value={
+                questionMode === "vendor_payments"
+                  ? formatMoney(vendorPaymentDetail?.totalAmount || 0)
+                  : formatMoney(filteredTotal)
+              }
               detail={
                 questionMode === "vendor_payments"
-                  ? "Vendor payments require the separate source shown below"
+                  ? vendorPaymentDetail
+                    ? `${formatNumber(
+                        vendorPaymentDetail.rowCount
+                      )} payment rows in official source`
+                    : "Vendor payments load from the separate source below"
                   : `${formatNumber(filteredRows.length)} matching allocations`
               }
             />
@@ -2063,28 +2705,37 @@ export default function App() {
             />
           )}
 
+          {(analysisMode === "payments" || questionMode === "vendor_payments") && (
+            <VendorPaymentsPanel
+              vendorPaymentYears={vendorPaymentYears}
+              selectedVendorYear={selectedVendorYear}
+              onSelectedVendorYearChange={setSelectedVendorYear}
+              vendorSearchQuery={vendorSearchQuery}
+              onVendorSearchQueryChange={setVendorSearchQuery}
+              vendorAgencyFilter={vendorAgencyFilter}
+              onVendorAgencyFilterChange={setVendorAgencyFilter}
+              vendorCategoryFilter={vendorCategoryFilter}
+              onVendorCategoryFilterChange={setVendorCategoryFilter}
+              vendorPaymentDetail={vendorPaymentDetail}
+              loading={loadingVendorPayments}
+              errorMessage={vendorErrorMessage}
+              onTracePayment={handleVendorTrace}
+              onExportPayments={exportVendorPaymentCsv}
+              onCopyCitation={copySourceCitation}
+              onCopyViewLink={copyViewLink}
+            />
+          )}
+
           {(analysisMode === "accountability" ||
             questionMode === "education_outcomes") && (
             <AccountabilityPanel budgetDetail={budgetDetail} />
           )}
 
-          {(analysisMode === "coverage" || questionMode === "vendor_payments") && (
+          {analysisMode === "coverage" && (
             <BudgetCoveragePanel
               selectedSourceId={coverageSourceId}
               onSelectSourceId={setCoverageSourceId}
             />
-          )}
-
-          {isUnsupportedQuestion && (
-            <section className="unsupported-panel">
-              <strong>{activeQuestion.label}</strong>
-              <p>{activeQuestion.description}</p>
-              <p>
-                The current operating-budget table is intentionally hidden for
-                this question because payments come from a different official
-                source with different thresholds and exclusions.
-              </p>
-            </section>
           )}
 
           {showsAllocationViews && (
@@ -2220,16 +2871,18 @@ export default function App() {
           </section>
           )}
 
-          <footer className="data-note">
-            {metadata.limitations.join(" ")}
-            {budgetDetail.isAllocationCapped
-              ? ` The grouped allocation table is capped at ${formatNumber(
-                  budgetDetail.allocationLimit
-                )} rows; the all-line-item summary total exceeds the returned grouped rows by ${formatFullMoney(
-                  budgetDetail.allocationDifference
-                )}.`
-              : ""}
-          </footer>
+          {questionMode !== "vendor_payments" && (
+            <footer className="data-note">
+              {metadata.limitations.join(" ")}
+              {budgetDetail.isAllocationCapped
+                ? ` The grouped allocation table is capped at ${formatNumber(
+                    budgetDetail.allocationLimit
+                  )} rows; the all-line-item summary total exceeds the returned grouped rows by ${formatFullMoney(
+                    budgetDetail.allocationDifference
+                  )}.`
+                : ""}
+            </footer>
+          )}
 
           <TraceDrawer
             row={traceRow}
