@@ -10,8 +10,11 @@ import {
 } from "./data/marylandBudget";
 import {
   BUDGET_COVERAGE_SOURCES,
+  CAPITAL_PROJECT_PIPELINE,
   COVERAGE_IMPLEMENTATION_STEPS,
+  LOCAL_LAYER_SOURCES,
 } from "./data/marylandBudgetCoverage";
+import { BUDGET_EXPLAINERS } from "./data/budgetExplainers";
 import {
   EDUCATION_BUDGET_MATCHERS,
   EDUCATION_EQUITY_GAPS,
@@ -30,6 +33,14 @@ const ANALYSIS_MODES = [
   {
     value: "drilldown",
     label: "Category Drilldown",
+  },
+  {
+    value: "trends",
+    label: "Year Changes",
+  },
+  {
+    value: "compare",
+    label: "Compare",
   },
   {
     value: "accountability",
@@ -143,6 +154,43 @@ const STATE_BY_CODE = Object.fromEntries(
   STATE_OPTIONS.map((state) => [state.code, state])
 );
 
+function getQueryValue(name) {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get(name) || "";
+}
+
+function getQueryOption(name, allowedValues, fallback) {
+  const value = getQueryValue(name);
+  return allowedValues.includes(value) ? value : fallback;
+}
+
+function getQueryStateCode() {
+  const value = getQueryValue("state").toUpperCase();
+  return STATE_BY_CODE[value] ? value : "";
+}
+
+function getQueryCoverageSourceId() {
+  const value = getQueryValue("source");
+  return BUDGET_COVERAGE_SOURCES.some((source) => source.id === value)
+    ? value
+    : "operating-budget";
+}
+
+function getInitialAnalysisMode() {
+  const requestedMode = getQueryValue("mode");
+
+  if (ANALYSIS_MODES.some((mode) => mode.value === requestedMode)) {
+    return requestedMode;
+  }
+
+  const requestedQuestion = getQueryValue("question");
+
+  if (requestedQuestion === "vendor_payments") return "coverage";
+  if (requestedQuestion === "education_outcomes") return "accountability";
+
+  return "overview";
+}
+
 function formatMoney(value) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -166,6 +214,18 @@ function formatNumber(value) {
 
 function formatPercent(value) {
   return `${(value || 0).toFixed(2)}%`;
+}
+
+function formatSignedMoney(value) {
+  if (value === null || value === undefined) return "Baseline";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatMoney(value)}`;
+}
+
+function formatSignedPercent(value) {
+  if (value === null || value === undefined) return "Baseline";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatPercent(value)}`;
 }
 
 function csvEscape(value) {
@@ -280,6 +340,105 @@ function getGroupedTotals(rows, fieldName, totalAmount, limit = 12) {
     .slice(0, limit);
 }
 
+function getYearTrendRows(budgetYears) {
+  const ascendingYears = [...budgetYears].sort(
+    (a, b) => a.fiscalYear - b.fiscalYear
+  );
+
+  return ascendingYears
+    .map((year, index) => {
+      const previousYear = ascendingYears[index - 1];
+      const changeAmount = previousYear
+        ? year.totalAmount - previousYear.totalAmount
+        : null;
+      const changePercent =
+        previousYear?.totalAmount > 0
+          ? (changeAmount / previousYear.totalAmount) * 100
+          : null;
+
+      return {
+        ...year,
+        changeAmount,
+        changePercent,
+        previousFiscalYear: previousYear?.fiscalYear || null,
+      };
+    })
+    .sort((a, b) => b.fiscalYear - a.fiscalYear);
+}
+
+function getPreviousYearSummary(budgetYears, selectedYear) {
+  const ascendingYears = [...budgetYears].sort(
+    (a, b) => a.fiscalYear - b.fiscalYear
+  );
+  const selectedIndex = ascendingYears.findIndex(
+    (year) => String(year.fiscalYear) === String(selectedYear)
+  );
+
+  return selectedIndex > 0 ? ascendingYears[selectedIndex - 1] : null;
+}
+
+function getCoverageScoreSummary() {
+  const totalScore = BUDGET_COVERAGE_SOURCES.reduce(
+    (sum, source) => sum + (source.coverageScore || 0),
+    0
+  );
+  const averageScore = Math.round(totalScore / BUDGET_COVERAGE_SOURCES.length);
+  const liveScore = BUDGET_COVERAGE_SOURCES.filter(
+    (source) => source.status === "Live"
+  ).reduce((sum, source) => sum + (source.coverageScore || 0), 0);
+
+  return {
+    averageScore,
+    liveScore,
+  };
+}
+
+function getEducationSpendContext(budgetDetail) {
+  const educationRows = budgetDetail?.allocations.filter(isEducationBudgetRow) || [];
+  const educationTotal = educationRows.reduce(
+    (sum, row) => sum + row.dollarAmount,
+    0
+  );
+  const educationShare =
+    budgetDetail?.totalAmount > 0
+      ? (educationTotal / budgetDetail.totalAmount) * 100
+      : 0;
+
+  return {
+    educationRows,
+    educationTotal,
+    educationShare,
+  };
+}
+
+function buildTraceText(row, budgetDetail) {
+  if (!row) return "";
+
+  const totalAmount = budgetDetail?.totalAmount || 0;
+  const share = totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0;
+
+  return `${row.sourceLabel}: FY ${row.fiscalYear}, ${row.budgetStage}, ${row.agencyName} / ${row.unitName} / ${row.programName} / ${row.subprogramName}. ${row.fundType}: ${formatFullMoney(row.dollarAmount)} divided by ${formatFullMoney(totalAmount)} selected-year total = ${formatPercent(share)}. Confidence: ${row.confidence}.`;
+}
+
+function getActiveFilterSummary(filters) {
+  return [
+    { label: "Search", value: filters.searchQuery || "None" },
+    { label: "Agency", value: filters.agencyFilter === "all" ? "All" : filters.agencyFilter },
+    { label: "Fund", value: filters.fundFilter === "all" ? "All" : filters.fundFilter },
+    {
+      label: "Stage",
+      value:
+        filters.budgetStageFilter === "all"
+          ? "All"
+          : filters.budgetStageFilter,
+    },
+    {
+      label: "Category",
+      value: filters.categoryFilter === "all" ? "All" : filters.categoryFilter,
+    },
+  ];
+}
+
 function MetricCard({ label, value, detail }) {
   return (
     <article className="metric-card">
@@ -392,6 +551,258 @@ function CoverageStatusBadge({ status }) {
   return <span className={`coverage-status status-${tone}`}>{status || "Unknown"}</span>;
 }
 
+function CoverageScoreMeter({ score }) {
+  const safeScore = Math.max(0, Math.min(score || 0, 100));
+
+  return (
+    <div className="coverage-score-meter">
+      <div className="coverage-score-label">
+        <span>Coverage score</span>
+        <strong>{safeScore}%</strong>
+      </div>
+      <div className="coverage-score-track" aria-hidden="true">
+        <div
+          className="coverage-score-fill"
+          style={{ "--score-width": `${safeScore}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ExplainerPanel() {
+  return (
+    <section className="panel explainer-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Plain-English Budget Terms</h2>
+          <p>
+            Short definitions for the terms that change how a spending number
+            should be read.
+          </p>
+        </div>
+      </div>
+
+      <div className="explainer-grid">
+        {BUDGET_EXPLAINERS.map((item) => (
+          <article key={item.term}>
+            <span>{item.term}</span>
+            <p>{item.plain}</p>
+            <small>{item.whyItMatters}</small>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function YearTrendPanel({ budgetYears, selectedYear }) {
+  const trendRows = getYearTrendRows(budgetYears);
+  const maxAmount = Math.max(...trendRows.map((year) => year.totalAmount), 0);
+  const comparableRows = trendRows.filter(
+    (year) => year.changeAmount !== null && year.changeAmount !== undefined
+  );
+  const selectedTrend = trendRows.find(
+    (year) => String(year.fiscalYear) === String(selectedYear)
+  );
+  const largestIncrease = [...comparableRows].sort(
+    (a, b) => b.changeAmount - a.changeAmount
+  )[0];
+
+  return (
+    <section className="panel trend-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Year-Over-Year Budget Change</h2>
+          <p>
+            Operating-budget totals by fiscal year from the connected Maryland
+            source. Budget-stage labels stay visible because not every year has
+            the same meaning.
+          </p>
+        </div>
+        {selectedTrend && <StageBadge stage={selectedTrend.budgetStage} />}
+      </div>
+
+      <div className="comparison-grid">
+        <MetricCard
+          label="Selected fiscal year"
+          value={formatMoney(selectedTrend?.totalAmount || 0)}
+          detail={`FY ${selectedTrend?.fiscalYear || selectedYear}`}
+        />
+        <MetricCard
+          label="Change from prior year"
+          value={formatSignedMoney(selectedTrend?.changeAmount)}
+          detail={formatSignedPercent(selectedTrend?.changePercent)}
+        />
+        <MetricCard
+          label="Largest increase in source"
+          value={formatSignedMoney(largestIncrease?.changeAmount)}
+          detail={
+            largestIncrease
+              ? `FY ${largestIncrease.fiscalYear} from FY ${largestIncrease.previousFiscalYear}`
+              : "Needs at least two years"
+          }
+        />
+      </div>
+
+      <div className="trend-list">
+        {trendRows.map((year) => {
+          const width =
+            maxAmount > 0 ? Math.max((year.totalAmount / maxAmount) * 100, 2) : 2;
+          const isSelected = String(year.fiscalYear) === String(selectedYear);
+
+          return (
+            <article
+              key={year.fiscalYear}
+              className={isSelected ? "trend-row active" : "trend-row"}
+            >
+              <div>
+                <strong>FY {year.fiscalYear}</strong>
+                <span>{year.budgetStage}</span>
+              </div>
+              <div className="trend-bar-track" aria-hidden="true">
+                <div
+                  className="trend-bar-fill"
+                  style={{ "--trend-width": `${width}%` }}
+                />
+              </div>
+              <div>
+                <strong>{formatMoney(year.totalAmount)}</strong>
+                <span>
+                  {year.previousFiscalYear
+                    ? `${formatSignedMoney(year.changeAmount)} / ${formatSignedPercent(
+                        year.changePercent
+                      )}`
+                    : "Baseline"}
+                </span>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function EfficiencyPanel({ budgetDetail }) {
+  const { educationTotal, educationShare } = getEducationSpendContext(budgetDetail);
+  const weakOrMixedSignals = EDUCATION_OUTCOME_METRICS.filter((metric) =>
+    ["Weak", "Mixed"].includes(metric.result)
+  ).length;
+  const strongSignals = EDUCATION_OUTCOME_METRICS.filter(
+    (metric) => metric.result === "Strong"
+  ).length;
+
+  return (
+    <section className="efficiency-panel">
+      <div className="panel-heading compact-heading">
+        <div>
+          <h3>Spending vs Outcome Efficiency</h3>
+          <p>
+            A screening view for follow-up questions. It compares the education
+            budget context with verified outcome signals without claiming
+            causation.
+          </p>
+        </div>
+      </div>
+
+      <div className="comparison-grid">
+        <MetricCard
+          label="Education budget context"
+          value={formatMoney(educationTotal)}
+          detail={`${formatPercent(educationShare)} of selected operating budget`}
+        />
+        <MetricCard
+          label="Weak or mixed signals"
+          value={formatNumber(weakOrMixedSignals)}
+          detail="MCAP and NAEP metrics needing follow-up"
+        />
+        <MetricCard
+          label="Strong signals"
+          value={formatNumber(strongSignals)}
+          detail="Graduation indicator currently rated strong"
+        />
+      </div>
+    </section>
+  );
+}
+
+function ComparisonPanel({ budgetDetail, budgetYears, filteredRows, selectedYear }) {
+  const previousYear = getPreviousYearSummary(budgetYears, selectedYear);
+  const selectedYearSummary = budgetYears.find(
+    (year) => String(year.fiscalYear) === String(selectedYear)
+  );
+  const previousChange = previousYear
+    ? budgetDetail.totalAmount - previousYear.totalAmount
+    : null;
+  const previousChangePercent =
+    previousYear?.totalAmount > 0
+      ? (previousChange / previousYear.totalAmount) * 100
+      : null;
+  const filteredTotal = filteredRows.reduce(
+    (sum, row) => sum + row.dollarAmount,
+    0
+  );
+  const filteredShare =
+    budgetDetail.totalAmount > 0 ? (filteredTotal / budgetDetail.totalAmount) * 100 : 0;
+  const { educationTotal, educationShare } = getEducationSpendContext(budgetDetail);
+  const coverageScore = getCoverageScoreSummary();
+
+  return (
+    <section className="panel comparison-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Comparison Mode</h2>
+          <p>
+            Compares the current view against the full selected-year operating
+            budget, the prior available fiscal year, education context, and
+            source coverage.
+          </p>
+        </div>
+        <StageBadge stage={selectedYearSummary?.budgetStage || budgetDetail.budgetStage} />
+      </div>
+
+      <div className="comparison-grid">
+        <MetricCard
+          label="Selected vs prior FY"
+          value={formatSignedMoney(previousChange)}
+          detail={
+            previousYear
+              ? `${formatSignedPercent(previousChangePercent)} from FY ${previousYear.fiscalYear}`
+              : "No prior fiscal year in source"
+          }
+        />
+        <MetricCard
+          label="Current filtered view"
+          value={formatMoney(filteredTotal)}
+          detail={`${formatPercent(filteredShare)} of FY ${budgetDetail.fiscalYear}`}
+        />
+        <MetricCard
+          label="Education spending context"
+          value={formatMoney(educationTotal)}
+          detail={`${formatPercent(educationShare)} of selected FY total`}
+        />
+        <MetricCard
+          label="Average source coverage"
+          value={`${coverageScore.averageScore}%`}
+          detail={`${coverageScore.liveScore}% live-source score already connected`}
+        />
+      </div>
+
+      <div className="benchmark-grid">
+        {EDUCATION_OUTCOME_METRICS.slice(0, 4).map((metric) => (
+          <article key={metric.id}>
+            <span>{metric.group}</span>
+            <strong>{metric.value}</strong>
+            <p>{metric.label}</p>
+            <ResultBadge result={metric.result} />
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function OutcomeMetricCard({ metric }) {
   const source = getEducationSource(metric.sourceId);
 
@@ -412,15 +823,8 @@ function OutcomeMetricCard({ metric }) {
 }
 
 function AccountabilityPanel({ budgetDetail }) {
-  const educationRows = budgetDetail?.allocations.filter(isEducationBudgetRow) || [];
-  const educationTotal = educationRows.reduce(
-    (sum, row) => sum + row.dollarAmount,
-    0
-  );
-  const educationShare =
-    budgetDetail?.totalAmount > 0
-      ? (educationTotal / budgetDetail.totalAmount) * 100
-      : 0;
+  const { educationRows, educationTotal, educationShare } =
+    getEducationSpendContext(budgetDetail);
   const topEducationPrograms = getGroupedTotals(
     educationRows,
     "programName",
@@ -470,6 +874,8 @@ function AccountabilityPanel({ budgetDetail }) {
           <p>{EDUCATION_OUTCOME_SUMMARY.guardrail}</p>
         </div>
       </section>
+
+      <EfficiencyPanel budgetDetail={budgetDetail} />
 
       <div className="outcome-grid">
         {EDUCATION_OUTCOME_METRICS.map((metric) => (
@@ -523,6 +929,7 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
   const liveSources = BUDGET_COVERAGE_SOURCES.filter(
     (source) => source.status === "Live"
   ).length;
+  const coverageScore = getCoverageScoreSummary();
 
   return (
     <section className="panel coverage-panel">
@@ -547,6 +954,11 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
           label="Live adapters"
           value={formatNumber(liveSources)}
           detail="Operating budget is connected now"
+        />
+        <MetricCard
+          label="Average coverage score"
+          value={`${coverageScore.averageScore}%`}
+          detail="Across live and mapped source categories"
         />
         <MetricCard
           label="Selected source"
@@ -582,8 +994,10 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
             </div>
             <ConfidenceBadge confidence={selectedSource.confidence} />
           </div>
+          <CoverageScoreMeter score={selectedSource.coverageScore} />
           <p>{selectedSource.adds}</p>
           <p>{selectedSource.availability}</p>
+          <CoverageStatusBadge status={selectedSource.phase} />
           <a href={selectedSource.sourceUrl} target="_blank" rel="noreferrer">
             {selectedSource.sourceLabel}
           </a>
@@ -597,7 +1011,69 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
               <li key={item}>{item}</li>
             ))}
           </ul>
+          <div className="source-task-grid">
+            <div>
+              <h4>Adapter Tasks</h4>
+              <ul>
+                {selectedSource.adapterTasks.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div>
+              <h4>Reconciliation Keys</h4>
+              <ul>
+                {selectedSource.reconciliationKeys.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </article>
+      </div>
+
+      <div className="source-buildout-grid">
+        <section>
+          <div className="coverage-detail-heading">
+            <div>
+              <span>Capital project explorer</span>
+              <h3>Project Normalization Pipeline</h3>
+            </div>
+            <CoverageStatusBadge status="Planned" />
+          </div>
+          <div className="mini-list">
+            {CAPITAL_PROJECT_PIPELINE.map((item) => (
+              <div className="mini-row" key={item.label}>
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.detail}</small>
+                </span>
+                <CoverageStatusBadge status={item.status} />
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section>
+          <div className="coverage-detail-heading">
+            <div>
+              <span>County and district layer</span>
+              <h3>Local Education Source Plan</h3>
+            </div>
+            <CoverageStatusBadge status="Source identified" />
+          </div>
+          <div className="mini-list">
+            {LOCAL_LAYER_SOURCES.map((item) => (
+              <div className="mini-row" key={item.label}>
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.detail}</small>
+                </span>
+                <CoverageStatusBadge status={item.status} />
+              </div>
+            ))}
+          </div>
+        </section>
       </div>
 
       <div className="coverage-step-list">
@@ -607,6 +1083,11 @@ function BudgetCoveragePanel({ selectedSourceId, onSelectSourceId }) {
             <strong>{step.label}</strong>
             <CoverageStatusBadge status={step.status} />
             <p>{step.detail}</p>
+            <ul>
+              {step.tasks.map((task) => (
+                <li key={task}>{task}</li>
+              ))}
+            </ul>
           </article>
         ))}
       </div>
@@ -658,27 +1139,153 @@ function BudgetBars({ rows }) {
   );
 }
 
+function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
+  if (!row) return null;
+
+  const totalAmount = budgetDetail?.totalAmount || 0;
+  const share = totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0;
+  const activeFilters = getActiveFilterSummary(filters);
+
+  return (
+    <div className="trace-drawer-backdrop" role="presentation">
+      <aside
+        className="trace-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Allocation trace"
+      >
+        <div className="trace-drawer-heading">
+          <div>
+            <span>Allocation trace</span>
+            <h2>{row.programName}</h2>
+          </div>
+          <button type="button" className="trace-close-button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="trace-drawer-section">
+          <span>Calculation</span>
+          <strong>{formatFullMoney(row.dollarAmount)}</strong>
+          <p>
+            Divided by {formatFullMoney(totalAmount)} selected-year operating
+            budget total equals {formatPercent(share)}.
+          </p>
+        </div>
+
+        <div className="trace-drawer-grid">
+          <div>
+            <span>Fiscal year</span>
+            <strong>FY {row.fiscalYear}</strong>
+          </div>
+          <div>
+            <span>Budget stage</span>
+            <StageBadge stage={row.budgetStage} />
+          </div>
+          <div>
+            <span>Agency</span>
+            <strong>{row.agencyName}</strong>
+          </div>
+          <div>
+            <span>Department</span>
+            <strong>{row.unitName}</strong>
+          </div>
+          <div>
+            <span>Category</span>
+            <strong>{row.categoryTitle}</strong>
+          </div>
+          <div>
+            <span>Fund type</span>
+            <strong>{row.fundType}</strong>
+          </div>
+        </div>
+
+        <div className="trace-drawer-section">
+          <span>Source</span>
+          <a href={row.sourceUrl} target="_blank" rel="noreferrer">
+            {row.sourceLabel}
+          </a>
+          <p>
+            Confidence: {row.confidence}. Notes: {row.notes}.
+          </p>
+        </div>
+
+        <div className="trace-drawer-section">
+          <span>Active filters</span>
+          <div className="trace-filter-grid">
+            {activeFilters.map((filter) => (
+              <div key={filter.label}>
+                <small>{filter.label}</small>
+                <strong>{filter.value}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button type="button" onClick={() => onCopy(row)}>
+          Copy trace
+        </button>
+      </aside>
+    </div>
+  );
+}
+
 export default function App() {
-  const [selectedStateCode, setSelectedStateCode] = useState("");
-  const [activeStateCode, setActiveStateCode] = useState("");
+  const [initialYearRequest] = useState(() => getQueryValue("year"));
+  const [hasInitialFilterParams] = useState(
+    () =>
+      Boolean(getQueryValue("search")) ||
+      Boolean(getQueryValue("agency")) ||
+      Boolean(getQueryValue("fund")) ||
+      Boolean(getQueryValue("stage")) ||
+      Boolean(getQueryValue("category"))
+  );
+  const [selectedStateCode, setSelectedStateCode] = useState(() =>
+    getQueryStateCode()
+  );
+  const [activeStateCode, setActiveStateCode] = useState(() => {
+    const stateCode = getQueryStateCode();
+    return STATE_BY_CODE[stateCode]?.isConnected ? stateCode : "";
+  });
   const [sourceMetadata, setSourceMetadata] = useState(DEFAULT_SOURCE_METADATA);
   const [budgetYears, setBudgetYears] = useState([]);
   const [selectedYear, setSelectedYear] = useState("");
   const [budgetDetail, setBudgetDetail] = useState(null);
-  const [analysisMode, setAnalysisMode] = useState("overview");
-  const [questionMode, setQuestionMode] = useState("latest");
-  const [coverageSourceId, setCoverageSourceId] = useState("operating-budget");
+  const [analysisMode, setAnalysisMode] = useState(getInitialAnalysisMode);
+  const [questionMode, setQuestionMode] = useState(() =>
+    getQueryOption(
+      "question",
+      QUESTION_OPTIONS.map((option) => option.value),
+      "latest"
+    )
+  );
+  const [coverageSourceId, setCoverageSourceId] = useState(
+    getQueryCoverageSourceId
+  );
   const [loadingYears, setLoadingYears] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [traceMessage, setTraceMessage] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [agencyFilter, setAgencyFilter] = useState("all");
-  const [fundFilter, setFundFilter] = useState("all");
-  const [budgetStageFilter, setBudgetStageFilter] = useState("all");
-  const [categoryFilter, setCategoryFilter] = useState("all");
-  const [sortMode, setSortMode] = useState("amount");
-  const [rowLimit, setRowLimit] = useState("100");
+  const [traceRow, setTraceRow] = useState(null);
+  const [searchQuery, setSearchQuery] = useState(() => getQueryValue("search"));
+  const [agencyFilter, setAgencyFilter] = useState(
+    () => getQueryValue("agency") || "all"
+  );
+  const [fundFilter, setFundFilter] = useState(
+    () => getQueryValue("fund") || "all"
+  );
+  const [budgetStageFilter, setBudgetStageFilter] = useState(
+    () => getQueryValue("stage") || "all"
+  );
+  const [categoryFilter, setCategoryFilter] = useState(
+    () => getQueryValue("category") || "all"
+  );
+  const [sortMode, setSortMode] = useState(() =>
+    getQueryOption("sort", ["amount", "agency", "program"], "amount")
+  );
+  const [rowLimit, setRowLimit] = useState(() =>
+    getQueryOption("rows", ROW_LIMITS, "100")
+  );
   const selectedState = STATE_BY_CODE[selectedStateCode];
   const activeState = STATE_BY_CODE[activeStateCode];
   const canOpenSelectedState = Boolean(selectedState?.isConnected);
@@ -695,6 +1302,7 @@ export default function App() {
     setSortMode("amount");
     setRowLimit("100");
     setTraceMessage("");
+    setTraceRow(null);
   }
 
   function clearBudgetData() {
@@ -704,6 +1312,7 @@ export default function App() {
     setSourceMetadata(DEFAULT_SOURCE_METADATA);
     setErrorMessage("");
     setTraceMessage("");
+    setTraceRow(null);
     setLoadingYears(false);
     setLoadingDetail(false);
     resetFilters();
@@ -723,6 +1332,7 @@ export default function App() {
   function handleQuestionModeChange(value) {
     setQuestionMode(value);
     setTraceMessage("");
+    setTraceRow(null);
 
     if (value === "education_outcomes") {
       setAnalysisMode("accountability");
@@ -744,10 +1354,33 @@ export default function App() {
     }
   }
 
+  function handleAnalysisModeChange(value) {
+    setAnalysisMode(value);
+    setTraceMessage("");
+    setTraceRow(null);
+
+    if (value === "coverage") {
+      if (questionMode === "education_outcomes") {
+        setQuestionMode("latest");
+      }
+      return;
+    }
+
+    if (value === "accountability") {
+      if (questionMode !== "education_outcomes") {
+        setQuestionMode("education_outcomes");
+      }
+      return;
+    }
+
+    if (questionMode === "vendor_payments" || questionMode === "education_outcomes") {
+      setQuestionMode("latest");
+    }
+  }
+
   function handleTrace(row) {
-    setTraceMessage(
-      `${row.sourceLabel}: FY ${row.fiscalYear}, ${row.budgetStage}, ${row.agencyName} / ${row.unitName} / ${row.programName} / ${row.subprogramName}. ${row.fundType}: ${formatFullMoney(row.dollarAmount)} (${formatPercent(row.percentage)} of selected-year total). Confidence: ${row.confidence}.`
-    );
+    setTraceRow(row);
+    setTraceMessage(`Trace opened for ${row.programName}.`);
   }
 
   useEffect(() => {
@@ -769,7 +1402,10 @@ export default function App() {
 
         setSourceMetadata(payload.metadata);
         setBudgetYears(years);
-        setSelectedYear(String(years[0].fiscalYear));
+        const requestedYear = years.find(
+          (year) => String(year.fiscalYear) === String(initialYearRequest)
+        );
+        setSelectedYear(String((requestedYear || years[0]).fiscalYear));
       } catch (error) {
         if (error.name !== "AbortError") {
           setErrorMessage(error.message);
@@ -782,7 +1418,7 @@ export default function App() {
     loadYears();
 
     return () => controller.abort();
-  }, [activeStateCode]);
+  }, [activeStateCode, initialYearRequest]);
 
   useEffect(() => {
     if (!activeStateCode || !selectedYear) return undefined;
@@ -793,12 +1429,15 @@ export default function App() {
       setBudgetDetail(null);
       setLoadingDetail(true);
       setErrorMessage("");
-      setSearchQuery("");
-      setAgencyFilter("all");
-      setFundFilter("all");
-      setBudgetStageFilter("all");
-      setCategoryFilter("all");
+      if (!hasInitialFilterParams) {
+        setSearchQuery("");
+        setAgencyFilter("all");
+        setFundFilter("all");
+        setBudgetStageFilter("all");
+        setCategoryFilter("all");
+      }
       setTraceMessage("");
+      setTraceRow(null);
 
       try {
         const detail = await fetchBudgetDetail(
@@ -824,7 +1463,48 @@ export default function App() {
     loadBudgetDetail();
 
     return () => controller.abort();
-  }, [activeStateCode, selectedYear]);
+  }, [activeStateCode, hasInitialFilterParams, selectedYear]);
+
+  useEffect(() => {
+    if (!activeStateCode || typeof window === "undefined") return;
+
+    const params = new URLSearchParams();
+    params.set("state", activeStateCode);
+    if (selectedYear) params.set("year", selectedYear);
+    params.set("mode", analysisMode);
+    params.set("question", questionMode);
+    if (analysisMode === "coverage" || questionMode === "vendor_payments") {
+      params.set("source", coverageSourceId);
+    }
+    if (searchQuery.trim()) params.set("search", searchQuery.trim());
+    if (agencyFilter !== "all") params.set("agency", agencyFilter);
+    if (fundFilter !== "all") params.set("fund", fundFilter);
+    if (budgetStageFilter !== "all") params.set("stage", budgetStageFilter);
+    if (categoryFilter !== "all") params.set("category", categoryFilter);
+    if (sortMode !== "amount") params.set("sort", sortMode);
+    if (rowLimit !== "100") params.set("rows", rowLimit);
+
+    const query = params.toString();
+    const nextUrl = `${window.location.pathname}?${query}${window.location.hash}`;
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+
+    if (nextUrl !== currentUrl) {
+      window.history.replaceState(null, "", nextUrl);
+    }
+  }, [
+    activeStateCode,
+    agencyFilter,
+    analysisMode,
+    budgetStageFilter,
+    categoryFilter,
+    coverageSourceId,
+    fundFilter,
+    questionMode,
+    rowLimit,
+    searchQuery,
+    selectedYear,
+    sortMode,
+  ]);
 
   const agencyOptions = useMemo(() => {
     if (!budgetDetail) return [];
@@ -934,9 +1614,7 @@ export default function App() {
   const hidesAllocationTable =
     questionMode === "vendor_payments" || questionMode === "education_outcomes";
   const showsAllocationViews =
-    analysisMode !== "accountability" &&
-    analysisMode !== "coverage" &&
-    !hidesAllocationTable;
+    ["overview", "drilldown"].includes(analysisMode) && !hidesAllocationTable;
   const hasActiveFilters =
     searchQuery.trim() ||
     agencyFilter !== "all" ||
@@ -998,6 +1676,17 @@ export default function App() {
     setTraceMessage(`Exported ${displayedRows.length} visible rows as CSV.`);
   }
 
+  async function copyViewLink() {
+    if (typeof window === "undefined") return;
+
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setTraceMessage("View link copied.");
+    } catch {
+      setTraceMessage(window.location.href);
+    }
+  }
+
   async function copySourceCitation() {
     const citation = `${metadata.sourceLabel}. Maryland Open Data. ${metadata.sourceUrl}. Data last modified ${SOURCE_LAST_MODIFIED}; metadata updated ${SOURCE_METADATA_UPDATED}.`;
 
@@ -1006,6 +1695,17 @@ export default function App() {
       setTraceMessage("Source citation copied.");
     } catch {
       setTraceMessage(citation);
+    }
+  }
+
+  async function copyTrace(row) {
+    const trace = buildTraceText(row, budgetDetail);
+
+    try {
+      await navigator.clipboard.writeText(trace);
+      setTraceMessage("Trace copied.");
+    } catch {
+      setTraceMessage(trace);
     }
   }
 
@@ -1105,13 +1805,20 @@ export default function App() {
           >
             Copy citation
           </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={copyViewLink}
+          >
+            Copy view link
+          </button>
           <button type="button" className="secondary-button" onClick={changeState}>
             Change state
           </button>
         </aside>
       </header>
 
-      <ModeTabs activeMode={analysisMode} onChange={setAnalysisMode} />
+      <ModeTabs activeMode={analysisMode} onChange={handleAnalysisModeChange} />
 
       <section className="toolbar" aria-label="Budget controls">
         <div className="control-field control-field-wide">
@@ -1339,6 +2046,23 @@ export default function App() {
             </section>
           )}
 
+          {(analysisMode === "overview" || analysisMode === "drilldown") && (
+            <ExplainerPanel />
+          )}
+
+          {analysisMode === "trends" && (
+            <YearTrendPanel budgetYears={budgetYears} selectedYear={selectedYear} />
+          )}
+
+          {analysisMode === "compare" && (
+            <ComparisonPanel
+              budgetDetail={budgetDetail}
+              budgetYears={budgetYears}
+              filteredRows={filteredRows}
+              selectedYear={selectedYear}
+            />
+          )}
+
           {(analysisMode === "accountability" ||
             questionMode === "education_outcomes") && (
             <AccountabilityPanel budgetDetail={budgetDetail} />
@@ -1432,6 +2156,13 @@ export default function App() {
               >
                 Copy source summary
               </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={copyViewLink}
+              >
+                Copy view link
+              </button>
             </div>
 
             <div className="table-wrap">
@@ -1499,6 +2230,20 @@ export default function App() {
                 )}.`
               : ""}
           </footer>
+
+          <TraceDrawer
+            row={traceRow}
+            budgetDetail={budgetDetail}
+            filters={{
+              searchQuery,
+              agencyFilter,
+              fundFilter,
+              budgetStageFilter,
+              categoryFilter,
+            }}
+            onClose={() => setTraceRow(null)}
+            onCopy={copyTrace}
+          />
         </>
       )}
     </main>
