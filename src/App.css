@@ -639,6 +639,7 @@ button:focus {
 .trend-panel,
 .comparison-panel,
 .vendor-payment-section,
+.funding-source-section,
 .grant-loan-section,
 .vendor-overview-panel {
   margin-bottom: 20px;
@@ -1268,6 +1269,7 @@ button:focus {
 }
 
 .vendor-controls,
+.funding-controls,
 .grant-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -1290,12 +1292,18 @@ button:focus {
   margin-bottom: 20px;
 }
 
+.funding-dashboard-grid {
+  margin-bottom: 20px;
+}
+
 .capital-dashboard-grid {
   margin-bottom: 20px;
 }
 
 .vendor-nested-panel h3,
 .vendor-table-panel h3,
+.funding-nested-panel h3,
+.funding-table-panel h3,
 .capital-nested-panel h3,
 .capital-table-panel h3 {
   margin: 0;

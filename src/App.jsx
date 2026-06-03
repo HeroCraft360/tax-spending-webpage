@@ -30,6 +30,13 @@ import {
   fetchCapitalProjectYears,
 } from "./data/marylandCapitalProjects";
 import {
+  DEFAULT_FUNDING_SOURCE_METADATA,
+  fetchFundingSourceDetail,
+  fetchFundingSourceYears,
+  FUNDING_SOURCE_LAST_UPDATED,
+  FUNDING_SOURCE_METADATA_UPDATED,
+} from "./data/marylandFundingSources";
+import {
   BUDGET_COVERAGE_SOURCES,
   CAPITAL_PROJECT_PIPELINE,
   COVERAGE_IMPLEMENTATION_STEPS,
@@ -62,6 +69,10 @@ const ANALYSIS_MODES = [
   {
     value: "compare",
     label: "Compare Sources",
+  },
+  {
+    value: "funding",
+    label: "Funding Sources",
   },
   {
     value: "reconcile",
@@ -113,6 +124,12 @@ const QUESTION_OPTIONS = [
     value: "vendor_payments",
     label: "Vendor payments",
     description: "Shows the official vendor-payment source status and exclusions.",
+  },
+  {
+    value: "funding_sources",
+    label: "Funding sources",
+    description:
+      "Shows official operating-budget fund source rows by fund type, fund source, agency, and program.",
   },
   {
     value: "grants_loans",
@@ -235,6 +252,7 @@ function getInitialAnalysisMode() {
   const requestedQuestion = getQueryValue("question");
 
   if (requestedQuestion === "vendor_payments") return "payments";
+  if (requestedQuestion === "funding_sources") return "funding";
   if (requestedQuestion === "grants_loans") return "grants";
   if (requestedQuestion === "capital_projects") return "capital";
   if (requestedQuestion === "education_outcomes") return "accountability";
@@ -302,6 +320,10 @@ function matchesQuestion(row, questionMode) {
     return false;
   }
 
+  if (questionMode === "funding_sources") {
+    return false;
+  }
+
   if (questionMode === "grants_loans") {
     return false;
   }
@@ -324,6 +346,10 @@ function getQuestionNotice(questionMode, selectedYearLabel) {
 
   if (questionMode === "vendor_payments") {
     return "Vendor payments use the official Maryland payments dataset. These are payment records, not operating-budget allocations, and current-year values may be partial.";
+  }
+
+  if (questionMode === "funding_sources") {
+    return "Funding sources use the official Maryland operating-budget funding-source dataset. These rows explain the fund/source mix behind budget amounts, but this source does not include the operating-budget stage/type field.";
   }
 
   if (questionMode === "grants_loans") {
@@ -739,6 +765,28 @@ function buildVendorTraceRow(payment, vendorPaymentDetail) {
   };
 }
 
+function buildFundingSourceTraceRow(row, fundingSourceDetail) {
+  return {
+    fiscalYear: row.fiscalYear,
+    agencyName: row.agencyName,
+    unitName: `${row.fundSourceName} (${row.fundSourceCode})`,
+    programName: row.programName,
+    subprogramName: row.description,
+    categoryTitle: row.categoryTitle,
+    fundType: row.fundType,
+    budgetStage: "Funding source row",
+    sourceLabel: row.sourceLabel,
+    sourceUrl: row.sourceUrl,
+    confidence: row.confidence,
+    notes: row.notes,
+    dollarAmount: row.dollarAmount,
+    percentage: row.percentage,
+    traceType: "Funding source",
+    traceTotalAmount: fundingSourceDetail?.totalAmount || 0,
+    traceTotalLabel: `FY ${row.fiscalYear} funding-source total`,
+  };
+}
+
 function buildCapitalTraceRow(project, capitalProjectDetail) {
   return {
     fiscalYear: project.fiscalYear,
@@ -784,6 +832,31 @@ function buildGrantLoanTraceRow(award, grantLoanDetail) {
 }
 
 function getActiveFilterSummary(filters) {
+  if (filters.traceContext === "funding") {
+    return [
+      { label: "Search", value: filters.searchQuery || "None" },
+      {
+        label: "Funding agency",
+        value: filters.agencyFilter === "all" ? "All" : filters.agencyFilter,
+      },
+      {
+        label: "Fund type",
+        value: filters.fundFilter === "all" ? "All" : filters.fundFilter,
+      },
+      {
+        label: "Fund source",
+        value:
+          filters.fundingSourceFilter === "all"
+            ? "All"
+            : filters.fundingSourceFilter,
+      },
+      {
+        label: "Category",
+        value: filters.categoryFilter === "all" ? "All" : filters.categoryFilter,
+      },
+    ];
+  }
+
   if (filters.traceContext === "grants") {
     return [
       { label: "Search", value: filters.searchQuery || "None" },
@@ -958,7 +1031,7 @@ function DataCoveragePanels({ metadata, budgetStage }) {
 function QuestionNotice({ questionMode, selectedYearLabel, analysisMode }) {
   const notice =
     analysisMode === "compare"
-      ? "Compare Sources keeps operating-budget allocations, vendor payments, grants/loans, and capital authorizations separate so scale checks do not imply a single reconciled total."
+      ? "Compare Sources keeps operating-budget allocations, funding sources, vendor payments, grants/loans, and capital authorizations separate so scale checks do not imply a single reconciled total."
       : analysisMode === "reconcile"
         ? "Reconcile Agencies matches published agency labels across sources and flags confidence. Treat the results as review guidance, not audited accounting matches."
       : getQuestionNotice(questionMode, selectedYearLabel);
@@ -1172,6 +1245,13 @@ function ComparisonPanel({
   budgetYears,
   filteredRows,
   selectedYear,
+  fundingSourceYears,
+  selectedFundingYear,
+  onSelectedFundingYearChange,
+  fundingSourceDetail,
+  loadingFundingYears,
+  loadingFundingSources,
+  fundingErrorMessage,
   vendorPaymentYears,
   selectedVendorYear,
   onSelectedVendorYearChange,
@@ -1215,16 +1295,23 @@ function ComparisonPanel({
   const coverageScore = getCoverageScoreSummary();
   const vendorMetadata =
     vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA;
+  const fundingMetadata =
+    fundingSourceDetail?.metadata || DEFAULT_FUNDING_SOURCE_METADATA;
   const grantLoanMetadata =
     grantLoanDetail?.metadata || DEFAULT_GRANTS_LOANS_METADATA;
   const capitalMetadata =
     capitalProjectDetail?.metadata || DEFAULT_CAPITAL_PROJECT_METADATA;
   const loadingVendorComparison = loadingVendorYears || loadingVendorPayments;
+  const loadingFundingComparison = loadingFundingYears || loadingFundingSources;
   const loadingGrantLoanComparison = loadingGrantLoanYears || loadingGrantLoans;
   const loadingCapitalComparison = loadingCapitalYears || loadingCapitalProjects;
   const vendorScale =
     budgetDetail.totalAmount > 0 && vendorPaymentDetail?.totalAmount
       ? (vendorPaymentDetail.totalAmount / budgetDetail.totalAmount) * 100
+      : 0;
+  const fundingScale =
+    budgetDetail.totalAmount > 0 && fundingSourceDetail?.totalAmount
+      ? (fundingSourceDetail.totalAmount / budgetDetail.totalAmount) * 100
       : 0;
   const grantLoanScale =
     budgetDetail.totalAmount > 0 && grantLoanDetail?.totalAmount
@@ -1257,6 +1344,7 @@ function ComparisonPanel({
     (a, b) => b.dollarAmount - a.dollarAmount
   )[0];
   const topVendor = vendorPaymentDetail?.topVendors?.[0];
+  const topFundSource = fundingSourceDetail?.fundSources?.[0];
   const topGrantRecipient = grantLoanDetail?.topRecipients?.[0];
   const topCapitalProject = capitalProjectDetail?.projects?.[0];
   const sourceCards = [
@@ -1278,6 +1366,33 @@ function ComparisonPanel({
         "Planned appropriations for programs, agencies, budget stages, fund types, and recurring services.",
       guardrail:
         "It does not show every vendor paid or every long-term construction/project authorization.",
+    },
+    {
+      id: "funding",
+      label: "Funding sources",
+      yearLabel: selectedFundingYear ? `FY ${selectedFundingYear}` : "Loading",
+      amount: fundingSourceDetail?.totalAmount || 0,
+      status: fundingErrorMessage
+        ? "Error"
+        : loadingFundingComparison
+          ? "Loading"
+          : fundingSourceDetail
+            ? "Live"
+            : "Waiting",
+      sourceLabel: fundingMetadata.sourceLabel,
+      sourceUrl: fundingMetadata.sourceUrl,
+      rowDetail: fundingSourceDetail
+        ? `${formatNumber(fundingSourceDetail.rowCount)} funding-source rows`
+        : "Separate official funding-source source",
+      primarySignal: topFundSource
+        ? `${topFundSource.name}: ${formatMoney(topFundSource.dollarAmount)}`
+        : "Top fund source loads with the funding source",
+      explains:
+        "Fund type and fund source mix behind operating-budget amounts by agency, program, category, and source code.",
+      guardrail:
+        "It does not include the operating-budget stage/type field and is not a vendor-payment or capital-project ledger.",
+      errorMessage: fundingErrorMessage,
+      loading: loadingFundingComparison,
     },
     {
       id: "payments",
@@ -1370,18 +1485,35 @@ function ComparisonPanel({
     <section className="panel comparison-panel">
       <div className="panel-heading">
         <div>
-          <h2>Budget vs Payments vs Grants vs Capital</h2>
+          <h2>Budget vs Funding vs Payments vs Grants vs Capital</h2>
           <p>
             Compare the main public spending sources without merging unlike
-            numbers into one total. The operating budget is the plan, vendor
-            payments show payment activity, grants and loans show State Aid
-            assistance, and capital projects show long-term authorizations.
+            numbers into one total. The operating budget is the plan, funding
+            sources explain the fund mix, vendor payments show payment activity,
+            grants and loans show State Aid assistance, and capital projects
+            show long-term authorizations.
           </p>
         </div>
         <StageBadge stage={selectedYearSummary?.budgetStage || budgetDetail.budgetStage} />
       </div>
 
       <div className="comparison-controls" aria-label="Comparison controls">
+        <div className="control-field">
+          <label htmlFor="compare-funding-year">Funding-source fiscal year</label>
+          <select
+            id="compare-funding-year"
+            value={selectedFundingYear}
+            onChange={(event) => onSelectedFundingYearChange(event.target.value)}
+            disabled={loadingFundingYears || !fundingSourceYears.length}
+          >
+            {fundingSourceYears.map((year) => (
+              <option key={year.fiscalYear} value={year.fiscalYear}>
+                FY {year.fiscalYear}
+              </option>
+            ))}
+          </select>
+        </div>
+
         <div className="control-field">
           <label htmlFor="compare-payment-year">Payment fiscal year</label>
           <select
@@ -1484,6 +1616,22 @@ function ComparisonPanel({
           detail={`${formatPercent(filteredShare)} of FY ${budgetDetail.fiscalYear}`}
         />
         <MetricCard
+          label="Funding-source scale check"
+          value={fundingSourceDetail ? formatPercent(fundingScale) : "Loading"}
+          detail={`Compared with FY ${budgetDetail.fiscalYear} operating total only`}
+        />
+        <MetricCard
+          label="General Fund share"
+          value={
+            fundingSourceDetail ? formatPercent(fundingSourceDetail.generalFundShare) : "Loading"
+          }
+          detail={
+            fundingSourceDetail
+              ? `FY ${fundingSourceDetail.fiscalYear} funding-source rows`
+              : "Loads with the funding-source source"
+          }
+        />
+        <MetricCard
           label="Vendor payment scale check"
           value={vendorPaymentDetail ? formatPercent(vendorScale) : "Loading"}
           detail={`Compared with FY ${budgetDetail.fiscalYear} operating total only`}
@@ -1514,15 +1662,18 @@ function ComparisonPanel({
         <article>
           <h3>Same dollars?</h3>
           <p>
-            No. Operating budgets, vendor payments, grants/loans, and capital
-            authorizations answer different questions. The scale checks are
-            orientation, not audited reconciliations.
+            No. Operating budgets, funding-source rows, vendor payments,
+            grants/loans, and capital authorizations answer different
+            questions. The scale checks are orientation, not audited
+            reconciliations.
           </p>
         </article>
         <article>
           <h3>Same year?</h3>
           <p>
-            Operating FY {budgetDetail.fiscalYear}, payment{" "}
+            Operating FY {budgetDetail.fiscalYear}, funding{" "}
+            {selectedFundingYear ? `FY ${selectedFundingYear}` : "year loading"},
+            payment{" "}
             {selectedVendorYear ? `FY ${selectedVendorYear}` : "year loading"},
             grant/loan{" "}
             {selectedGrantLoanYear ? `FY ${selectedGrantLoanYear}` : "year loading"},
@@ -2517,6 +2668,409 @@ function PaymentBars({ rows }) {
         );
       })}
     </div>
+  );
+}
+
+function FundingSourceBars({ rows }) {
+  const maxAmount = rows[0]?.dollarAmount || 0;
+
+  if (!rows.length) {
+    return <p className="empty-state">No funding-source rows match the current filters.</p>;
+  }
+
+  return (
+    <div className="bar-list">
+      {rows.map((row, index) => {
+        const width = maxAmount > 0 ? (row.dollarAmount / maxAmount) * 100 : 0;
+
+        return (
+          <div
+            className="bar-row"
+            key={`${row.fiscalYear}-${row.agencyName}-${row.programName}-${row.fundSourceCode}-${row.categoryTitle}-${index}`}
+          >
+            <div className="bar-row-top">
+              <span>{row.fundSourceName}</span>
+              <strong>{formatMoney(row.dollarAmount)}</strong>
+            </div>
+            <div className="bar-track" aria-hidden="true">
+              <div
+                className="bar-fill"
+                style={{
+                  "--bar-width": `${width}%`,
+                  "--bar-color": BAR_COLORS[index % BAR_COLORS.length],
+                }}
+              />
+            </div>
+            <div className="bar-row-meta">
+              <span>{row.agencyName}</span>
+              <span>
+                {row.programName} / {row.fundType} / {row.fundSourceCode} /{" "}
+                {formatPercent(row.percentage)}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FundingSourcesPanel({
+  fundingSourceYears,
+  selectedFundingYear,
+  onSelectedFundingYearChange,
+  fundingSearchQuery,
+  onFundingSearchQueryChange,
+  fundingFundTypeFilter,
+  onFundingFundTypeFilterChange,
+  fundingSourceFilter,
+  onFundingSourceFilterChange,
+  fundingAgencyFilter,
+  onFundingAgencyFilterChange,
+  fundingCategoryFilter,
+  onFundingCategoryFilterChange,
+  fundingSourceDetail,
+  loading,
+  errorMessage,
+  onTraceFundingSource,
+  onExportFundingSources,
+  onCopyCitation,
+  onCopyViewLink,
+}) {
+  const metadata = fundingSourceDetail?.metadata || DEFAULT_FUNDING_SOURCE_METADATA;
+  const fundingRows = fundingSourceDetail?.fundingRows || [];
+  const topFundingRows = fundingRows.slice(0, 10);
+  const topFundSource = fundingSourceDetail?.fundSources?.[0];
+  const fundTypeOptions = fundingSourceDetail?.fundTypes || [];
+  const fundSourceOptions = fundingSourceDetail?.fundSources || [];
+  const agencyOptions = fundingSourceDetail?.topAgencies || [];
+  const categoryOptions = fundingSourceDetail?.categories || [];
+  const sourcePageUrl = metadata.sourcePageUrl || metadata.budgetPageUrl;
+
+  return (
+    <section className="funding-source-section">
+      <section className="panel vendor-overview-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Funding Source Explorer</h2>
+            <p>
+              Search official Maryland operating-budget funding-source rows by
+              fiscal year, fund type, fund source, agency, program, category,
+              and description.
+            </p>
+          </div>
+          <CoverageStatusBadge status="Live" />
+        </div>
+
+        <div className="vendor-source-strip">
+          <div>
+            <span>Official source</span>
+            <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">
+              {metadata.sourceLabel}
+            </a>
+          </div>
+          <div>
+            <span>Updated</span>
+            <strong>{metadata.dataLastUpdated}</strong>
+          </div>
+          <div>
+            <span>Budget stage</span>
+            <strong>No stage field</strong>
+          </div>
+          <div>
+            <span>DBM page</span>
+            <a href={sourcePageUrl} target="_blank" rel="noreferrer">
+              Operating budget
+            </a>
+          </div>
+        </div>
+
+        <div className="funding-controls" aria-label="Funding source controls">
+          <div className="control-field">
+            <label htmlFor="funding-year-select">Funding fiscal year</label>
+            <select
+              id="funding-year-select"
+              value={selectedFundingYear}
+              onChange={(event) => onSelectedFundingYearChange(event.target.value)}
+              disabled={loading || !fundingSourceYears.length}
+            >
+              {fundingSourceYears.map((year) => (
+                <option key={year.fiscalYear} value={year.fiscalYear}>
+                  FY {year.fiscalYear}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field control-field-wide">
+            <label htmlFor="funding-search-input">Funding search</label>
+            <input
+              id="funding-search-input"
+              type="search"
+              placeholder="Fund source, agency, program, category, or description"
+              value={fundingSearchQuery}
+              onChange={(event) => onFundingSearchQueryChange(event.target.value)}
+              disabled={loading || !selectedFundingYear}
+            />
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="funding-fund-type-filter">Fund type</label>
+            <select
+              id="funding-fund-type-filter"
+              value={fundingFundTypeFilter}
+              onChange={(event) => onFundingFundTypeFilterChange(event.target.value)}
+              disabled={loading || !fundingSourceDetail}
+            >
+              <option value="all">All fund types</option>
+              {fundTypeOptions.map((fundType) => (
+                <option key={fundType.name} value={fundType.name}>
+                  {fundType.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="funding-source-filter">Fund source</label>
+            <select
+              id="funding-source-filter"
+              value={fundingSourceFilter}
+              onChange={(event) => onFundingSourceFilterChange(event.target.value)}
+              disabled={loading || !fundingSourceDetail}
+            >
+              <option value="all">All fund sources</option>
+              {fundSourceOptions.map((source) => (
+                <option
+                  key={`${source.fundType}-${source.fundSourceCode}-${source.fundSourceName}`}
+                  value={source.fundSourceName}
+                >
+                  {source.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="funding-agency-filter">Funding agency</label>
+            <select
+              id="funding-agency-filter"
+              value={fundingAgencyFilter}
+              onChange={(event) => onFundingAgencyFilterChange(event.target.value)}
+              disabled={loading || !fundingSourceDetail}
+            >
+              <option value="all">All agencies</option>
+              {agencyOptions.map((agency) => (
+                <option key={agency.name} value={agency.name}>
+                  {agency.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="control-field">
+            <label htmlFor="funding-category-filter">Budget category</label>
+            <select
+              id="funding-category-filter"
+              value={fundingCategoryFilter}
+              onChange={(event) => onFundingCategoryFilterChange(event.target.value)}
+              disabled={loading || !fundingSourceDetail}
+            >
+              <option value="all">All categories</option>
+              {categoryOptions.map((category) => (
+                <option key={category.name} value={category.name}>
+                  {category.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {loading && (
+          <section className="loading-panel vendor-loading-panel" aria-live="polite">
+            <div className="spinner" />
+            <p>Loading FY {selectedFundingYear || ""} funding sources...</p>
+          </section>
+        )}
+
+        {errorMessage && <p className="error-message">{errorMessage}</p>}
+      </section>
+
+      {fundingSourceDetail && !loading && (
+        <>
+          <div className="comparison-grid">
+            <MetricCard
+              label={`FY ${fundingSourceDetail.fiscalYear} funding-source total`}
+              value={formatMoney(fundingSourceDetail.totalAmount)}
+              detail={formatFullMoney(fundingSourceDetail.totalAmount)}
+            />
+            <MetricCard
+              label="Funding rows in source"
+              value={formatNumber(fundingSourceDetail.rowCount)}
+              detail="Rows after active funding filters"
+            />
+            <MetricCard
+              label="Grouped funding rows returned"
+              value={formatNumber(fundingRows.length)}
+              detail={`Top grouped rows, capped at ${formatNumber(
+                fundingSourceDetail.sourceLimit
+              )}`}
+            />
+            <MetricCard
+              label="General Fund share"
+              value={formatPercent(fundingSourceDetail.generalFundShare)}
+              detail={`${formatMoney(
+                fundingSourceDetail.generalFundTotal
+              )} in General Fund rows`}
+            />
+            <MetricCard
+              label="Top fund source in view"
+              value={topFundSource ? formatMoney(topFundSource.dollarAmount) : "$0"}
+              detail={topFundSource?.name || "No fund-source rows returned"}
+            />
+          </div>
+
+          <section className="dashboard-grid funding-dashboard-grid">
+            <section className="panel panel-large funding-nested-panel">
+              <div className="panel-heading">
+                <div>
+                  <h3>Largest Funding Sources</h3>
+                  <p>
+                    Grouped by agency, program, fund type, fund source, category,
+                    and description after active filters.
+                  </p>
+                </div>
+                <span>{formatNumber(fundingRows.length)} rows</span>
+              </div>
+
+              <FundingSourceBars rows={topFundingRows} />
+            </section>
+
+            <div className="side-stack">
+              <MiniBreakdown
+                title="Fund Types In View"
+                rows={fundingSourceDetail.fundTypes}
+              />
+              <MiniBreakdown
+                title="Top Fund Sources"
+                rows={fundingSourceDetail.fundSources.slice(0, 12)}
+              />
+              <MiniBreakdown
+                title="Top Agencies In View"
+                rows={fundingSourceDetail.topAgencies.slice(0, 12)}
+              />
+            </div>
+          </section>
+
+          <section className="table-panel funding-table-panel">
+            <div className="panel-heading">
+              <div>
+                <h3>Funding Source Detail</h3>
+                <p>
+                  Showing {formatNumber(fundingRows.length)} grouped rows from
+                  FY {fundingSourceDetail.fiscalYear}.
+                  {fundingSourceDetail.isRowCapped
+                    ? ` The table returns the top ${formatNumber(
+                        fundingSourceDetail.sourceLimit
+                      )} grouped funding rows.`
+                    : ""}
+                </p>
+              </div>
+              <span>{formatMoney(fundingSourceDetail.totalAmount)}</span>
+            </div>
+
+            <div className="table-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onExportFundingSources}
+                disabled={!fundingRows.length}
+              >
+                Export funding CSV
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyCitation}
+              >
+                Copy funding source
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCopyViewLink}
+              >
+                Copy view link
+              </button>
+            </div>
+
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fiscal Year</th>
+                    <th>Fund Type</th>
+                    <th>Fund Source</th>
+                    <th>Code</th>
+                    <th>Agency</th>
+                    <th>Program</th>
+                    <th>Category</th>
+                    <th>Description</th>
+                    <th>Amount</th>
+                    <th>Share</th>
+                    <th>Rows</th>
+                    <th>Confidence</th>
+                    <th>Trace</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fundingRows.map((row, index) => (
+                    <tr
+                      key={`${row.fiscalYear}-${row.agencyName}-${row.programName}-${row.fundType}-${row.fundSourceCode}-${row.categoryTitle}-${index}`}
+                    >
+                      <td>FY {row.fiscalYear}</td>
+                      <td>{row.fundType}</td>
+                      <td>{row.fundSourceName}</td>
+                      <td>{row.fundSourceCode}</td>
+                      <td>{row.agencyName}</td>
+                      <td>{row.programName}</td>
+                      <td>{row.categoryTitle}</td>
+                      <td>{row.description}</td>
+                      <td>{formatFullMoney(row.dollarAmount)}</td>
+                      <td>{formatPercent(row.percentage)}</td>
+                      <td>{formatNumber(row.rowCount)}</td>
+                      <td>
+                        <ConfidenceBadge confidence={row.confidence} />
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="trace-button"
+                          onClick={() => onTraceFundingSource(row)}
+                        >
+                          Trace
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <footer className="panel-footnote">
+            {metadata.limitations.join(" ")}
+            {fundingSourceDetail.isRowCapped
+              ? ` The grouped funding table is capped at ${formatNumber(
+                  fundingSourceDetail.sourceLimit
+                )} rows; the all-row funding-source total exceeds returned grouped rows by ${formatFullMoney(
+                  fundingSourceDetail.rowDifference
+                )}.`
+              : ""}
+          </footer>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -3588,11 +4142,14 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
   const share = totalAmount > 0 ? (row.dollarAmount / totalAmount) * 100 : 0;
   const activeFilters = getActiveFilterSummary(filters);
   const isVendorTrace = row.traceType === "Vendor payment";
+  const isFundingTrace = row.traceType === "Funding source";
   const isCapitalTrace = row.traceType === "Capital project";
   const isGrantTrace = row.traceType === "Grant/loan award";
   const totalLabel = row.traceTotalLabel || "selected-year operating budget total";
   const traceLabel = isVendorTrace
     ? "Vendor payment trace"
+    : isFundingTrace
+      ? "Funding source trace"
     : isCapitalTrace
       ? "Capital project trace"
       : isGrantTrace
@@ -3643,6 +4200,8 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
             <span>
               {isVendorTrace
                 ? "Payment category/code"
+                : isFundingTrace
+                  ? "Fund source"
                 : isCapitalTrace
                   ? "County"
                   : isGrantTrace
@@ -3655,6 +4214,8 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
             <span>
               {isVendorTrace
                 ? "Category/code"
+                : isFundingTrace
+                  ? "Budget category"
                 : isCapitalTrace
                   ? "Capital category"
                   : isGrantTrace
@@ -3708,6 +4269,7 @@ function TraceDrawer({ row, budgetDetail, filters, onClose, onCopy }) {
 export default function App() {
   const [initialYearRequest] = useState(() => getQueryValue("year"));
   const [initialVendorYearRequest] = useState(() => getQueryValue("paymentYear"));
+  const [initialFundingYearRequest] = useState(() => getQueryValue("fundingYear"));
   const [initialGrantLoanYearRequest] = useState(() => getQueryValue("grantLoanYear"));
   const [initialCapitalYearRequest] = useState(() => getQueryValue("capitalYear"));
   const [hasInitialFilterParams] = useState(
@@ -3732,6 +4294,9 @@ export default function App() {
   const [vendorPaymentYears, setVendorPaymentYears] = useState([]);
   const [selectedVendorYear, setSelectedVendorYear] = useState("");
   const [vendorPaymentDetail, setVendorPaymentDetail] = useState(null);
+  const [fundingSourceYears, setFundingSourceYears] = useState([]);
+  const [selectedFundingYear, setSelectedFundingYear] = useState("");
+  const [fundingSourceDetail, setFundingSourceDetail] = useState(null);
   const [grantLoanYears, setGrantLoanYears] = useState([]);
   const [selectedGrantLoanYear, setSelectedGrantLoanYear] = useState("");
   const [grantLoanDetail, setGrantLoanDetail] = useState(null);
@@ -3749,6 +4314,7 @@ export default function App() {
     return ["compare", "reconcile"].includes(analysisMode) &&
       [
         "vendor_payments",
+        "funding_sources",
         "grants_loans",
         "capital_projects",
         "education_outcomes",
@@ -3765,12 +4331,15 @@ export default function App() {
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [loadingVendorYears, setLoadingVendorYears] = useState(false);
   const [loadingVendorPayments, setLoadingVendorPayments] = useState(false);
+  const [loadingFundingYears, setLoadingFundingYears] = useState(false);
+  const [loadingFundingSources, setLoadingFundingSources] = useState(false);
   const [loadingGrantLoanYears, setLoadingGrantLoanYears] = useState(false);
   const [loadingGrantLoans, setLoadingGrantLoans] = useState(false);
   const [loadingCapitalYears, setLoadingCapitalYears] = useState(false);
   const [loadingCapitalProjects, setLoadingCapitalProjects] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [vendorErrorMessage, setVendorErrorMessage] = useState("");
+  const [fundingErrorMessage, setFundingErrorMessage] = useState("");
   const [grantLoanErrorMessage, setGrantLoanErrorMessage] = useState("");
   const [capitalErrorMessage, setCapitalErrorMessage] = useState("");
   const [traceMessage, setTraceMessage] = useState("");
@@ -3802,6 +4371,21 @@ export default function App() {
   );
   const [vendorCategoryFilter, setVendorCategoryFilter] = useState(
     () => getQueryValue("vendorCategory") || "all"
+  );
+  const [fundingSearchQuery, setFundingSearchQuery] = useState(() =>
+    getQueryValue("fundingSearch")
+  );
+  const [fundingFundTypeFilter, setFundingFundTypeFilter] = useState(
+    () => getQueryValue("fundingFundType") || "all"
+  );
+  const [fundingSourceFilter, setFundingSourceFilter] = useState(
+    () => getQueryValue("fundingSource") || "all"
+  );
+  const [fundingAgencyFilter, setFundingAgencyFilter] = useState(
+    () => getQueryValue("fundingAgency") || "all"
+  );
+  const [fundingCategoryFilter, setFundingCategoryFilter] = useState(
+    () => getQueryValue("fundingCategory") || "all"
   );
   const [grantLoanSearchQuery, setGrantLoanSearchQuery] = useState(() =>
     getQueryValue("grantSearch")
@@ -3851,6 +4435,11 @@ export default function App() {
     setVendorSearchQuery("");
     setVendorAgencyFilter("all");
     setVendorCategoryFilter("all");
+    setFundingSearchQuery("");
+    setFundingFundTypeFilter("all");
+    setFundingSourceFilter("all");
+    setFundingAgencyFilter("all");
+    setFundingCategoryFilter("all");
     setGrantLoanSearchQuery("");
     setGrantorFilter("all");
     setGrantLoanCategoryFilter("all");
@@ -3872,6 +4461,9 @@ export default function App() {
     setVendorPaymentYears([]);
     setSelectedVendorYear("");
     setVendorPaymentDetail(null);
+    setFundingSourceYears([]);
+    setSelectedFundingYear("");
+    setFundingSourceDetail(null);
     setGrantLoanYears([]);
     setSelectedGrantLoanYear("");
     setGrantLoanDetail(null);
@@ -3881,6 +4473,7 @@ export default function App() {
     setSourceMetadata(DEFAULT_SOURCE_METADATA);
     setErrorMessage("");
     setVendorErrorMessage("");
+    setFundingErrorMessage("");
     setGrantLoanErrorMessage("");
     setCapitalErrorMessage("");
     setTraceMessage("");
@@ -3889,6 +4482,8 @@ export default function App() {
     setLoadingDetail(false);
     setLoadingVendorYears(false);
     setLoadingVendorPayments(false);
+    setLoadingFundingYears(false);
+    setLoadingFundingSources(false);
     setLoadingGrantLoanYears(false);
     setLoadingGrantLoans(false);
     setLoadingCapitalYears(false);
@@ -3917,6 +4512,9 @@ export default function App() {
     } else if (value === "vendor_payments") {
       setAnalysisMode("payments");
       setCoverageSourceId("vendor-payments");
+    } else if (value === "funding_sources") {
+      setAnalysisMode("funding");
+      setCoverageSourceId("budget-funding-sources");
     } else if (value === "grants_loans") {
       setAnalysisMode("grants");
       setCoverageSourceId("grants-loans");
@@ -3927,6 +4525,7 @@ export default function App() {
       analysisMode === "accountability" ||
       analysisMode === "coverage" ||
       analysisMode === "payments" ||
+      analysisMode === "funding" ||
       analysisMode === "grants" ||
       analysisMode === "capital"
     ) {
@@ -3964,6 +4563,14 @@ export default function App() {
       return;
     }
 
+    if (value === "funding") {
+      if (questionMode !== "funding_sources") {
+        setQuestionMode("funding_sources");
+      }
+      setCoverageSourceId("budget-funding-sources");
+      return;
+    }
+
     if (value === "grants") {
       if (questionMode !== "grants_loans") {
         setQuestionMode("grants_loans");
@@ -3993,6 +4600,7 @@ export default function App() {
 
     if (
       questionMode === "vendor_payments" ||
+      questionMode === "funding_sources" ||
       questionMode === "grants_loans" ||
       questionMode === "capital_projects" ||
       questionMode === "education_outcomes"
@@ -4087,6 +4695,118 @@ export default function App() {
 
     return () => controller.abort();
   }, [activeStateCode, hasInitialFilterParams, selectedYear]);
+
+  useEffect(() => {
+    const needsFundingSources =
+      questionMode === "funding_sources" || analysisMode === "compare";
+
+    if (!activeStateCode || !needsFundingSources) return undefined;
+
+    const controller = new AbortController();
+
+    async function loadFundingYears() {
+      setLoadingFundingYears(true);
+      setFundingErrorMessage("");
+
+      try {
+        const payload = await fetchFundingSourceYears(controller.signal);
+        const years = payload.years;
+
+        if (!years.length) {
+          throw new Error("No Maryland funding-source years were returned.");
+        }
+
+        setFundingSourceYears(years);
+        const requestedYear = years.find(
+          (year) =>
+            String(year.fiscalYear) === String(initialFundingYearRequest) ||
+            String(year.fiscalYear) === String(selectedYear)
+        );
+        setSelectedFundingYear(String((requestedYear || years[0]).fiscalYear));
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setFundingErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingFundingYears(false);
+      }
+    }
+
+    loadFundingYears();
+
+    return () => controller.abort();
+  }, [
+    activeStateCode,
+    analysisMode,
+    initialFundingYearRequest,
+    questionMode,
+    selectedYear,
+  ]);
+
+  useEffect(() => {
+    const needsFundingSources =
+      questionMode === "funding_sources" || analysisMode === "compare";
+
+    if (!activeStateCode || !needsFundingSources || !selectedFundingYear) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+
+    async function loadFundingSources() {
+      setFundingSourceDetail(null);
+      setLoadingFundingSources(true);
+      setFundingErrorMessage("");
+      setTraceMessage("");
+      setTraceRow(null);
+
+      try {
+        const detail = await fetchFundingSourceDetail(
+          {
+            fiscalYear: Number(selectedFundingYear),
+            searchQuery: analysisMode === "compare" ? "" : fundingSearchQuery,
+            fundTypeFilter:
+              analysisMode === "compare" ? "all" : fundingFundTypeFilter,
+            fundSourceFilter:
+              analysisMode === "compare" ? "all" : fundingSourceFilter,
+            agencyFilter:
+              analysisMode === "compare" ? "all" : fundingAgencyFilter,
+            categoryFilter:
+              analysisMode === "compare" ? "all" : fundingCategoryFilter,
+          },
+          controller.signal
+        );
+
+        if (!detail) {
+          throw new Error(
+            `No funding-source detail was returned for FY ${selectedFundingYear}.`
+          );
+        }
+
+        setFundingSourceDetail(detail);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          setFundingErrorMessage(error.message);
+        }
+      } finally {
+        setLoadingFundingSources(false);
+      }
+    }
+
+    loadFundingSources();
+
+    return () => controller.abort();
+  }, [
+    activeStateCode,
+    analysisMode,
+    fundingAgencyFilter,
+    fundingCategoryFilter,
+    fundingFundTypeFilter,
+    fundingSearchQuery,
+    fundingSourceFilter,
+    questionMode,
+    selectedFundingYear,
+  ]);
 
   useEffect(() => {
     const needsVendorPayments =
@@ -4480,10 +5200,35 @@ export default function App() {
       analysisMode === "compare" ||
       analysisMode === "reconcile" ||
       questionMode === "vendor_payments" ||
+      questionMode === "funding_sources" ||
       questionMode === "grants_loans" ||
       questionMode === "capital_projects"
     ) {
       params.set("source", coverageSourceId);
+    }
+    if (
+      questionMode === "funding_sources" ||
+      analysisMode === "compare"
+    ) {
+      if (selectedFundingYear) params.set("fundingYear", selectedFundingYear);
+      if (questionMode === "funding_sources" && fundingSearchQuery.trim()) {
+        params.set("fundingSearch", fundingSearchQuery.trim());
+      }
+      if (
+        questionMode === "funding_sources" &&
+        fundingFundTypeFilter !== "all"
+      ) {
+        params.set("fundingFundType", fundingFundTypeFilter);
+      }
+      if (questionMode === "funding_sources" && fundingSourceFilter !== "all") {
+        params.set("fundingSource", fundingSourceFilter);
+      }
+      if (questionMode === "funding_sources" && fundingAgencyFilter !== "all") {
+        params.set("fundingAgency", fundingAgencyFilter);
+      }
+      if (questionMode === "funding_sources" && fundingCategoryFilter !== "all") {
+        params.set("fundingCategory", fundingCategoryFilter);
+      }
     }
     if (
       questionMode === "vendor_payments" ||
@@ -4585,6 +5330,11 @@ export default function App() {
     categoryFilter,
     coverageSourceId,
     fundFilter,
+    fundingAgencyFilter,
+    fundingCategoryFilter,
+    fundingFundTypeFilter,
+    fundingSearchQuery,
+    fundingSourceFilter,
     grantLoanCategoryFilter,
     grantLoanSearchQuery,
     grantLoanZipFilter,
@@ -4593,6 +5343,7 @@ export default function App() {
     rowLimit,
     searchQuery,
     selectedCapitalYear,
+    selectedFundingYear,
     selectedGrantLoanYear,
     selectedYear,
     sortMode,
@@ -4708,13 +5459,14 @@ export default function App() {
     coverage:
       analysisMode === "reconcile"
         ? "This reconciliation view matches connected Maryland operating-budget agencies, vendor-payment agency summaries, grant/loan grantor summaries, and FY 2027 enacted capital-budget agency/project rows using normalized published labels."
-        : "This comparison uses connected Maryland operating-budget allocations, vendor-payment summaries, grants/loans, and FY 2027 enacted capital-budget project/program authorizations while keeping source definitions separate.",
+        : "This comparison uses connected Maryland operating-budget allocations, funding-source rows, vendor-payment summaries, grants/loans, and FY 2027 enacted capital-budget project/program authorizations while keeping source definitions separate.",
     confidenceReason:
       analysisMode === "reconcile"
         ? "Official Maryland sources are connected; match confidence reflects label alignment and source coverage rather than audited accounting reconciliation."
-        : "Official Maryland sources are connected for the operating-budget, vendor-payment, grants/loans, and capital-budget comparison streams.",
+        : "Official Maryland sources are connected for the operating-budget, funding-source, vendor-payment, grants/loans, and capital-budget comparison streams.",
     knownExclusions: [
       "Audited payment-to-program reconciliation keys",
+      "Audited fund-source-to-payment reconciliation keys",
       "Procurement contract identifiers matched to every payment",
       "Recipient-level grant/loan awards below the $50,000 reporting threshold",
       "Capital project-to-vendor payment matching",
@@ -4727,6 +5479,8 @@ export default function App() {
       ? comparisonMetadata
       : questionMode === "vendor_payments"
       ? vendorPaymentDetail?.metadata || DEFAULT_VENDOR_PAYMENT_METADATA
+      : questionMode === "funding_sources"
+        ? fundingSourceDetail?.metadata || DEFAULT_FUNDING_SOURCE_METADATA
       : questionMode === "grants_loans"
         ? grantLoanDetail?.metadata || DEFAULT_GRANTS_LOANS_METADATA
       : questionMode === "capital_projects"
@@ -4735,6 +5489,8 @@ export default function App() {
   const displaySourceLastUpdated =
     questionMode === "vendor_payments"
       ? displayMetadata.dataLastUpdated || VENDOR_PAYMENTS_LAST_UPDATED
+      : questionMode === "funding_sources"
+        ? displayMetadata.dataLastUpdated || FUNDING_SOURCE_LAST_UPDATED
       : questionMode === "grants_loans"
         ? displayMetadata.dataLastUpdated || GRANTS_LOANS_LAST_UPDATED
       : questionMode === "capital_projects"
@@ -4743,6 +5499,8 @@ export default function App() {
   const displayMetadataUpdated =
     questionMode === "vendor_payments"
       ? displayMetadata.metadataUpdated || VENDOR_PAYMENTS_METADATA_UPDATED
+      : questionMode === "funding_sources"
+        ? displayMetadata.metadataUpdated || FUNDING_SOURCE_METADATA_UPDATED
       : questionMode === "grants_loans"
         ? displayMetadata.metadataUpdated || GRANTS_LOANS_METADATA_UPDATED
       : questionMode === "capital_projects"
@@ -4753,6 +5511,7 @@ export default function App() {
     QUESTION_OPTIONS[0];
   const hidesAllocationTable =
     questionMode === "vendor_payments" ||
+    questionMode === "funding_sources" ||
     questionMode === "grants_loans" ||
     questionMode === "capital_projects" ||
     questionMode === "education_outcomes";
@@ -4770,6 +5529,11 @@ export default function App() {
     vendorSearchQuery.trim() ||
     vendorAgencyFilter !== "all" ||
     vendorCategoryFilter !== "all" ||
+    fundingSearchQuery.trim() ||
+    fundingFundTypeFilter !== "all" ||
+    fundingSourceFilter !== "all" ||
+    fundingAgencyFilter !== "all" ||
+    fundingCategoryFilter !== "all" ||
     grantLoanSearchQuery.trim() ||
     grantorFilter !== "all" ||
     grantLoanCategoryFilter !== "all" ||
@@ -4879,6 +5643,71 @@ export default function App() {
     link.click();
     URL.revokeObjectURL(url);
     setTraceMessage(`Exported ${payments.length} grouped vendor-payment rows as CSV.`);
+  }
+
+  function exportFundingSourceCsv() {
+    const fundingRows = fundingSourceDetail?.fundingRows || [];
+
+    if (!fundingRows.length) return;
+
+    const headers = [
+      "Fiscal Year",
+      "Agency",
+      "Agency Code",
+      "Unit",
+      "Unit Code",
+      "Program",
+      "Program Code",
+      "Fund Type",
+      "Fund Source",
+      "Fund Source Code",
+      "Category",
+      "Description",
+      "Amount",
+      "% Funding Source Total",
+      "Source Rows",
+      "Source",
+      "Confidence",
+      "Notes",
+    ];
+    const lines = [
+      headers.map(csvEscape).join(","),
+      ...fundingRows.map((row) =>
+        [
+          row.fiscalYear,
+          row.agencyName,
+          row.agencyCode,
+          row.unitName,
+          row.unitCode,
+          row.programName,
+          row.programCode,
+          row.fundType,
+          row.fundSourceName,
+          row.fundSourceCode,
+          row.categoryTitle,
+          row.description,
+          row.dollarAmount,
+          row.percentage.toFixed(4),
+          row.rowCount,
+          row.sourceLabel,
+          row.confidence,
+          row.notes,
+        ]
+          .map(csvEscape)
+          .join(",")
+      ),
+    ];
+    const csv = lines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `maryland-funding-sources-fy-${selectedFundingYear}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setTraceMessage(
+      `Exported ${fundingRows.length} grouped funding-source rows as CSV.`
+    );
   }
 
   function exportGrantLoanCsv() {
@@ -5035,6 +5864,11 @@ export default function App() {
     setTraceMessage(`Trace opened for ${payment.vendorName}.`);
   }
 
+  function handleFundingSourceTrace(row) {
+    setTraceRow(buildFundingSourceTraceRow(row, fundingSourceDetail));
+    setTraceMessage(`Trace opened for ${row.fundSourceName}.`);
+  }
+
   function handleGrantLoanTrace(award) {
     setTraceRow(buildGrantLoanTraceRow(award, grantLoanDetail));
     setTraceMessage(`Trace opened for ${award.granteeName}.`);
@@ -5108,6 +5942,8 @@ export default function App() {
         ? "agency reconciliation"
       : questionMode === "vendor_payments"
       ? "vendor payments"
+      : questionMode === "funding_sources"
+        ? "funding sources"
       : questionMode === "grants_loans"
         ? "grants and loans"
       : questionMode === "capital_projects"
@@ -5120,6 +5956,8 @@ export default function App() {
         ? `${activeStateName} Agency Reconciliation`
       : questionMode === "vendor_payments"
       ? `${activeStateName} Vendor Payments`
+      : questionMode === "funding_sources"
+        ? `${activeStateName} Funding Sources`
       : questionMode === "grants_loans"
         ? `${activeStateName} Grants And Loans`
       : questionMode === "capital_projects"
@@ -5127,11 +5965,13 @@ export default function App() {
         : `${activeStateName} Operating Budget`;
   const heroDescription =
     analysisMode === "compare"
-      ? "Compare operating-budget allocations, official vendor-payment records, grants/loans, and enacted capital-budget authorizations while keeping each source's definition visible."
+      ? "Compare operating-budget allocations, official funding-source rows, vendor-payment records, grants/loans, and enacted capital-budget authorizations while keeping each source's definition visible."
       : analysisMode === "reconcile"
         ? "Match agency labels across operating-budget allocations, vendor-payment records, grants/loans, and capital-project authorizations with confidence flags and source-specific drill-ins."
       : questionMode === "vendor_payments"
       ? "Explore official vendor-payment records beside operating-budget context without mixing transaction data into budget allocations."
+      : questionMode === "funding_sources"
+        ? "Explore official operating-budget funding-source rows beside allocation context without mixing fund-source analysis into payment or capital ledgers."
       : questionMode === "grants_loans"
         ? "Explore official grant and loan recipient records beside operating-budget context without mixing State Aid assistance records into budget allocations."
       : questionMode === "capital_projects"
@@ -5229,6 +6069,12 @@ export default function App() {
               <StageBadge stage={`FY ${selectedVendorYear}`} />
             </>
           )}
+          {questionMode === "funding_sources" && selectedFundingYear && (
+            <>
+              <span>Funding fiscal year</span>
+              <StageBadge stage={`FY ${selectedFundingYear}`} />
+            </>
+          )}
           {questionMode === "grants_loans" && selectedGrantLoanYear && (
             <>
               <span>Grant/loan fiscal year</span>
@@ -5242,6 +6088,7 @@ export default function App() {
             </>
           )}
           {questionMode !== "vendor_payments" &&
+            questionMode !== "funding_sources" &&
             questionMode !== "grants_loans" &&
             questionMode !== "capital_projects" &&
             budgetDetail?.budgetStage && (
@@ -5438,6 +6285,7 @@ export default function App() {
       {(loadingYears ||
         loadingDetail ||
         loadingVendorYears ||
+        loadingFundingYears ||
         loadingGrantLoanYears ||
         loadingCapitalYears) && (
         <section className="loading-panel" aria-live="polite">
@@ -5447,6 +6295,8 @@ export default function App() {
               ? "Loading fiscal years..."
               : loadingVendorYears
                 ? "Loading vendor-payment fiscal years..."
+              : loadingFundingYears
+                ? "Loading funding-source fiscal years..."
                 : loadingGrantLoanYears
                   ? "Loading grant/loan fiscal years..."
                 : loadingCapitalYears
@@ -5469,6 +6319,8 @@ export default function App() {
                   ? "Agency reconciliation"
                   : questionMode === "vendor_payments"
                 ? "Vendor payments"
+                : questionMode === "funding_sources"
+                  ? "Funding sources"
                 : questionMode === "grants_loans"
                   ? "Grants and loans"
                 : questionMode === "capital_projects"
@@ -5484,6 +6336,8 @@ export default function App() {
                 ? "Budget agency reconciliation summary"
                 : questionMode === "vendor_payments"
                 ? "Budget and vendor payment summary"
+                : questionMode === "funding_sources"
+                  ? "Budget and funding-source summary"
                 : questionMode === "grants_loans"
                   ? "Budget and grants/loans summary"
                 : questionMode === "capital_projects"
@@ -5495,6 +6349,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? `FY ${budgetDetail.fiscalYear} operating-budget total`
+                  : questionMode === "funding_sources"
+                    ? `FY ${budgetDetail.fiscalYear} operating-budget total`
                   : questionMode === "grants_loans"
                     ? `FY ${budgetDetail.fiscalYear} operating-budget total`
                   : questionMode === "capital_projects"
@@ -5508,6 +6364,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Operating-budget line items"
+                  : questionMode === "funding_sources"
+                    ? "Operating-budget line items"
                   : questionMode === "grants_loans"
                     ? "Operating-budget line items"
                   : questionMode === "capital_projects"
@@ -5521,6 +6379,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Grouped budget allocations returned"
+                  : questionMode === "funding_sources"
+                    ? "Grouped budget allocations returned"
                   : questionMode === "grants_loans"
                     ? "Grouped budget allocations returned"
                   : questionMode === "capital_projects"
@@ -5536,6 +6396,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? "Operating-budget stage"
+                  : questionMode === "funding_sources"
+                    ? "Operating-budget stage"
                   : questionMode === "grants_loans"
                     ? "Operating-budget stage"
                   : questionMode === "capital_projects"
@@ -5549,6 +6411,8 @@ export default function App() {
               label={
                 questionMode === "vendor_payments"
                   ? `FY ${selectedVendorYear || "selected"} vendor-payment total`
+                  : questionMode === "funding_sources"
+                    ? `FY ${selectedFundingYear || "selected"} funding-source total`
                   : questionMode === "grants_loans"
                     ? `FY ${selectedGrantLoanYear || "selected"} grant/loan total`
                   : questionMode === "capital_projects"
@@ -5558,6 +6422,8 @@ export default function App() {
               value={
                 questionMode === "vendor_payments"
                   ? formatMoney(vendorPaymentDetail?.totalAmount || 0)
+                  : questionMode === "funding_sources"
+                    ? formatMoney(fundingSourceDetail?.totalAmount || 0)
                   : questionMode === "grants_loans"
                     ? formatMoney(grantLoanDetail?.totalAmount || 0)
                   : questionMode === "capital_projects"
@@ -5577,6 +6443,12 @@ export default function App() {
                           capitalProjectDetail.rowCount
                         )} capital rows in normalized source`
                       : "Capital projects load from the separate source below"
+                  : questionMode === "funding_sources"
+                    ? fundingSourceDetail
+                      ? `${formatNumber(
+                          fundingSourceDetail.rowCount
+                        )} funding-source rows in official source`
+                      : "Funding sources load from the separate source below"
                   : questionMode === "grants_loans"
                     ? grantLoanDetail
                       ? `${formatNumber(
@@ -5608,6 +6480,13 @@ export default function App() {
               budgetYears={budgetYears}
               filteredRows={filteredRows}
               selectedYear={selectedYear}
+              fundingSourceYears={fundingSourceYears}
+              selectedFundingYear={selectedFundingYear}
+              onSelectedFundingYearChange={setSelectedFundingYear}
+              fundingSourceDetail={fundingSourceDetail}
+              loadingFundingYears={loadingFundingYears}
+              loadingFundingSources={loadingFundingSources}
+              fundingErrorMessage={fundingErrorMessage}
               vendorPaymentYears={vendorPaymentYears}
               selectedVendorYear={selectedVendorYear}
               onSelectedVendorYearChange={setSelectedVendorYear}
@@ -5661,6 +6540,31 @@ export default function App() {
               onOpenVendorAgency={openVendorAgencyRows}
               onOpenGrantLoanAgency={openGrantLoanAgencyRows}
               onOpenCapitalAgency={openCapitalAgencyRows}
+            />
+          )}
+
+          {(analysisMode === "funding" || questionMode === "funding_sources") && (
+            <FundingSourcesPanel
+              fundingSourceYears={fundingSourceYears}
+              selectedFundingYear={selectedFundingYear}
+              onSelectedFundingYearChange={setSelectedFundingYear}
+              fundingSearchQuery={fundingSearchQuery}
+              onFundingSearchQueryChange={setFundingSearchQuery}
+              fundingFundTypeFilter={fundingFundTypeFilter}
+              onFundingFundTypeFilterChange={setFundingFundTypeFilter}
+              fundingSourceFilter={fundingSourceFilter}
+              onFundingSourceFilterChange={setFundingSourceFilter}
+              fundingAgencyFilter={fundingAgencyFilter}
+              onFundingAgencyFilterChange={setFundingAgencyFilter}
+              fundingCategoryFilter={fundingCategoryFilter}
+              onFundingCategoryFilterChange={setFundingCategoryFilter}
+              fundingSourceDetail={fundingSourceDetail}
+              loading={loadingFundingSources}
+              errorMessage={fundingErrorMessage}
+              onTraceFundingSource={handleFundingSourceTrace}
+              onExportFundingSources={exportFundingSourceCsv}
+              onCopyCitation={copySourceCitation}
+              onCopyViewLink={copyViewLink}
             />
           )}
 
@@ -5900,6 +6804,8 @@ export default function App() {
               searchQuery:
                 questionMode === "grants_loans"
                   ? grantLoanSearchQuery
+                  : questionMode === "funding_sources"
+                    ? fundingSearchQuery
                   : questionMode === "vendor_payments"
                     ? vendorSearchQuery
                   : questionMode === "capital_projects"
@@ -5908,6 +6814,8 @@ export default function App() {
               agencyFilter:
                 questionMode === "grants_loans"
                   ? grantorFilter
+                  : questionMode === "funding_sources"
+                    ? fundingAgencyFilter
                   : questionMode === "vendor_payments"
                     ? vendorAgencyFilter
                   : questionMode === "capital_projects"
@@ -5916,6 +6824,8 @@ export default function App() {
               fundFilter:
                 questionMode === "grants_loans"
                   ? grantLoanZipFilter
+                  : questionMode === "funding_sources"
+                    ? fundingFundTypeFilter
                   : questionMode === "capital_projects"
                   ? capitalFundTypeFilter
                   : fundFilter,
@@ -5923,6 +6833,8 @@ export default function App() {
               categoryFilter:
                 questionMode === "grants_loans"
                   ? grantLoanCategoryFilter
+                  : questionMode === "funding_sources"
+                    ? fundingCategoryFilter
                   : questionMode === "vendor_payments"
                     ? vendorCategoryFilter
                   : questionMode === "capital_projects"
@@ -5931,11 +6843,17 @@ export default function App() {
               traceContext:
                 questionMode === "grants_loans"
                   ? "grants"
+                  : questionMode === "funding_sources"
+                    ? "funding"
                   : questionMode === "vendor_payments"
                     ? "vendor"
                     : questionMode === "capital_projects"
                       ? "capital"
                       : "operating",
+              fundingSourceFilter:
+                questionMode === "funding_sources"
+                  ? fundingSourceFilter
+                  : undefined,
               grantLoanZipFilter:
                 questionMode === "grants_loans" ? grantLoanZipFilter : undefined,
               capitalCountyFilter:
